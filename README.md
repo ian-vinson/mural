@@ -87,7 +87,7 @@ Manual (any distro):
   # See https://github.com/Almamu/linux-wallpaperengine
 
   # 2. Clone Mural
-  git clone https://github.com/[YOUR_GITHUB]/mural.git
+  git clone https://github.com/ian-vinson/mural.git
   cd mural
 
   # 3. Install Python dependencies
@@ -170,7 +170,7 @@ Mural is open source and welcomes contributions. Key areas needing help:
 - Wallpaper format documentation and testing
 
 To contribute:
-  git clone https://github.com/[YOUR_GITHUB]/mural.git
+  git clone https://github.com/ian-vinson/mural.git
   cd mural
   pip install -r requirements-dev.txt
   # See DEVGUIDE.txt for full development setup
