@@ -1,0 +1,721 @@
+MURAL - DEVGUIDE.txt
+====================
+Developer Guide — Building Mural from Scratch
+
+This document covers the full technical architecture, development phases,
+file structure, implementation details, and known hard problems for each
+component of Mural. Written for a developer picking this up with Claude Code
+or working independently.
+
+Read README.txt first for product context.
+
+---
+
+TECHNOLOGY DECISIONS
+--------------------
+
+GUI Framework:     Python 3.11+ / PySide6
+                   Chosen for development speed, Claude Code compatibility,
+                   and existing reference GUIs in the linux-wallpaperengine
+                   ecosystem using PyQt6/PySide6.
+
+Rendering Backend: linux-wallpaperengine (C++, GPL v3)
+                   Not rewritten. Used as a managed subprocess.
+                   https://github.com/Almamu/linux-wallpaperengine
+
+Session Service:   systemd user service (Python process)
+                   Manages wallpaper lifecycle independently of GUI.
+
+DE Integration:    KDE Plasma 6 wallpaper plugin (QML + C++)
+                   Phase 1 target. Uses KDE's documented wallpaper plugin API.
+                   Installed to ~/.local/share/plasma/wallpapers/
+
+Content Platform:  FastAPI (Python) + PostgreSQL + Cloudflare R2
+                   Simple self-hosted REST API for wallpaper metadata.
+                   File storage via Cloudflare R2 (S3-compatible, free egress).
+
+IPC:               Unix socket or D-Bus for GUI <-> Core Service communication
+                   D-Bus preferred for KDE integration (KDE uses it natively).
+
+Packaging (v1):    AUR (PKGBUILD)
+Packaging (v2):    Flatpak via io.qt.PySide.BaseApp on KDE runtime
+
+License:           GPL v3 (application), MIT (content platform API)
+
+---
+
+REPOSITORY STRUCTURE
+--------------------
+
+mural/
+├── README.txt                  # User-facing readme
+├── DEVGUIDE.txt                # This file
+├── LICENSE                     # GPL v3
+├── install.sh                  # Manual install script
+├── PKGBUILD                    # AUR package definition
+│
+├── mural/                      # Main Python application package
+│   ├── __init__.py
+│   ├── main.py                 # Application entry point
+│   ├── config.py               # Configuration management (~/.config/mural/)
+│   ├── detection.py            # DE/compositor auto-detection
+│   │
+│   ├── gui/                    # PySide6 GUI layer
+│   │   ├── __init__.py
+│   │   ├── mainwindow.py       # Main application window
+│   │   ├── library_tab.py      # Local wallpaper library browser
+│   │   ├── platform_tab.py     # Mural content platform browser
+│   │   ├── settings_tab.py     # App settings and monitor config
+│   │   ├── wallpaper_card.py   # Individual wallpaper preview card widget
+│   │   └── assets/             # Icons, QSS stylesheets
+│   │
+│   ├── core/                   # Core service (session daemon)
+│   │   ├── __init__.py
+│   │   ├── service.py          # Main service loop and D-Bus server
+│   │   ├── wallpaper_manager.py # Wallpaper apply/stop/switch logic
+│   │   ├── monitor_manager.py  # Monitor detection and assignment
+│   │   ├── playlist_manager.py # Playlist and rotation logic
+│   │   └── autostart.py        # systemd unit management
+│   │
+│   ├── adapters/               # DE-specific integration layer
+│   │   ├── __init__.py
+│   │   ├── base.py             # Abstract adapter interface
+│   │   ├── plasma.py           # KDE Plasma 6 adapter
+│   │   ├── wlr.py              # wlroots/Hyprland adapter [planned]
+│   │   ├── x11.py              # X11 root window adapter [planned]
+│   │   └── gnome.py            # GNOME Shell adapter [planned]
+│   │
+│   ├── backend/                # linux-wallpaperengine subprocess wrapper
+│   │   ├── __init__.py
+│   │   ├── runner.py           # Subprocess management for lwe binary
+│   │   ├── discovery.py        # Find lwe binary and Wallpaper Engine assets
+│   │   └── formats.py          # Wallpaper type detection (video/scene/web)
+│   │
+│   └── platform/               # Mural content platform client
+│       ├── __init__.py
+│       ├── client.py            # REST API client
+│       ├── models.py            # Wallpaper metadata models
+│       └── cache.py             # Local download cache management
+│
+├── plasma-plugin/              # KDE Plasma 6 wallpaper plugin
+│   ├── metadata.json           # Plugin metadata (Plasma 6 format)
+│   └── contents/
+│       └── ui/
+│           └── main.qml        # Plugin QML entry point
+│
+├── systemd/
+│   └── mural-core.service      # systemd user service unit file
+│
+├── platform/                   # Mural content platform (separate service)
+│   ├── LICENSE                 # MIT
+│   ├── main.py                 # FastAPI application entry point
+│   ├── models.py               # Database models (SQLAlchemy)
+│   ├── routes/
+│   │   ├── wallpapers.py       # GET /wallpapers, GET /wallpapers/{id}
+│   │   ├── upload.py           # POST /upload (authenticated)
+│   │   └── search.py           # GET /search?q=&tags=&type=
+│   └── storage.py              # Cloudflare R2 integration
+│
+├── requirements.txt            # Production Python dependencies
+├── requirements-dev.txt        # Development dependencies
+└── tests/                      # Test suite
+    ├── test_detection.py
+    ├── test_backend.py
+    └── test_platform_client.py
+
+---
+
+PHASE 1 — CORE RENDERING AND SESSION SERVICE
+--------------------------------------------
+Goal: Wallpaper plays, persists when GUI closes, survives login/logout.
+This is the foundational layer everything else builds on.
+
+STEP 1.1 — DE Detection (mural/detection.py)
+
+  Read environment variables at startup:
+    XDG_CURRENT_DESKTOP  →  "KDE", "GNOME", "Hyprland", etc.
+    XDG_SESSION_TYPE     →  "wayland" or "x11"
+    WAYLAND_DISPLAY      →  confirms Wayland if set
+    DISPLAY              →  confirms X11 if set
+
+  Return a DetectionResult dataclass:
+    desktop: str         # "plasma", "hyprland", "gnome", "xfce", "unknown"
+    session: str         # "wayland", "x11"
+    adapter_class: type  # Which adapter class to instantiate
+
+  Implementation note:
+    XDG_CURRENT_DESKTOP can return "KDE" on Plasma.
+    Also check for PLASMA_SESSION or KDE_FULL_SESSION as fallback.
+    On Hyprland: XDG_CURRENT_DESKTOP = "Hyprland", WAYLAND_DISPLAY is set.
+    Never crash on unknown DE — fall back gracefully to a null adapter
+    that logs a warning.
+
+STEP 1.2 — Backend Runner (mural/backend/runner.py)
+
+  Wraps linux-wallpaperengine as a managed subprocess.
+
+  Key responsibilities:
+  - Find the lwe binary (check PATH, /opt/linux-wallpaperengine/, AUR path)
+  - Find Wallpaper Engine assets folder (check standard Steam paths)
+  - Build the correct CLI command for a given wallpaper and monitor
+  - Start, monitor, and stop the subprocess cleanly
+  - Handle process crashes with restart logic
+
+  Standard Steam asset paths to check:
+    ~/.steam/steam/steamapps/common/wallpaper_engine/
+    ~/.local/share/Steam/steamapps/common/wallpaper_engine/
+    ~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/
+    ~/snap/steam/common/.local/share/Steam/steamapps/common/
+
+  CLI command format (from linux-wallpaperengine README):
+    linux-wallpaperengine \
+      --screen-root <MONITOR_NAME> \
+      --bg <WALLPAPER_ID_OR_PATH>
+
+  For multiple monitors:
+    linux-wallpaperengine \
+      --screen-root DP-3 --bg <ID_1> \
+      --screen-root HDMI-A-2 --bg <ID_2>
+
+  Process management:
+    Use subprocess.Popen, store PID.
+    On service stop, send SIGTERM then SIGKILL after 3s timeout.
+    On unexpected exit, log and optionally restart.
+
+STEP 1.3 — Monitor Manager (mural/core/monitor_manager.py)
+
+  Detect connected monitors and their output names.
+  Output names are needed for --screen-root argument.
+
+  For KDE Plasma (Wayland):
+    Use kscreen-doctor -o and parse output.
+    Alternatively use Qt's QScreen API via PySide6 — cleaner.
+
+  For X11:
+    Use xrandr --listmonitors and parse output.
+    Or use subprocess: xrandr | grep " connected"
+
+  Store monitor assignments per-monitor in config:
+    ~/.config/mural/monitors.json
+    {
+      "DP-3": {"wallpaper": "/path/to/wallpaper", "enabled": true},
+      "HDMI-A-2": {"wallpaper": "/path/to/other", "enabled": true}
+    }
+
+STEP 1.4 — Core Service (mural/core/service.py)
+
+  This is the session daemon. Runs as a systemd user service.
+  Must NOT require a display/GUI to run (headless operation).
+
+  Responsibilities:
+  - Start on user login via systemd
+  - Read monitor config and apply wallpapers via BackendRunner
+  - Expose D-Bus interface for GUI to communicate with
+  - Handle monitor hotplug events (monitor connected/disconnected)
+  - Handle session events (lock screen, suspend, fullscreen detection)
+
+  D-Bus interface (mural/core/service.py):
+    Service name:  com.mural.Core
+    Object path:   /com/mural/Core
+
+    Methods:
+      SetWallpaper(monitor: str, path: str) -> bool
+      GetCurrentWallpaper(monitor: str) -> str
+      GetMonitors() -> list[str]
+      SetEnabled(enabled: bool) -> void
+      GetStatus() -> dict
+
+  D-Bus in Python:
+    Use dbus-python or dasbus library.
+    dasbus is more Pythonic and better maintained.
+    pip install dasbus
+
+STEP 1.5 — systemd User Service (systemd/mural-core.service)
+
+  [Unit]
+  Description=Mural Animated Wallpaper Service
+  After=graphical-session.target plasma-plasmashell.service
+  PartOf=graphical-session.target
+
+  [Service]
+  Type=simple
+  ExecStart=/usr/bin/mural-core
+  Restart=on-failure
+  RestartSec=3
+
+  [Install]
+  WantedBy=graphical-session.target
+
+  Install to: ~/.config/systemd/user/mural-core.service
+  Enable with: systemctl --user enable --now mural-core.service
+
+  IMPORTANT: After=plasma-plasmashell.service ensures Mural starts
+  after the Plasma desktop is ready, not before it. Getting this
+  ordering wrong causes the wallpaper to fail silently.
+
+---
+
+PHASE 2 — KDE PLASMA ADAPTER
+-----------------------------
+Goal: Mural wallpapers appear in KDE System Settings as a wallpaper type.
+This is what makes Mural feel native rather than bolted-on.
+
+WHAT A PLASMA WALLPAPER PLUGIN IS:
+  A folder installed to ~/.local/share/plasma/wallpapers/
+  containing metadata.json and a QML file at contents/ui/main.qml.
+  KDE loads it and shows it in the "Wallpaper Type" dropdown in
+  System Settings → Appearance → Wallpaper.
+
+STEP 2.1 — Plugin Metadata (plasma-plugin/metadata.json)
+
+  {
+    "KPlugin": {
+      "Id": "com.mural.wallpaper",
+      "Name": "Mural",
+      "Description": "Animated wallpapers via Mural",
+      "Icon": "mural",
+      "Version": "0.1.0",
+      "Website": "https://github.com/[YOUR_GITHUB]/mural",
+      "License": "GPL-3.0",
+      "Authors": [{"Name": "Your Name", "Email": "you@example.com"}]
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-KDE-ServiceTypes": ["Plasma/Wallpaper"]
+  }
+
+  IMPORTANT: "X-Plasma-API-Minimum-Version": "6.0" is required.
+  Without it, Plasma 6 ignores the plugin entirely.
+
+STEP 2.2 — Plugin QML (plasma-plugin/contents/ui/main.qml)
+
+  The QML plugin's job is minimal: display the rendered wallpaper output
+  from linux-wallpaperengine and communicate with Mural Core Service
+  via D-Bus to know which wallpaper to show.
+
+  import QtQuick
+  import org.kde.plasma.plasmoid
+
+  WallpaperItem {
+    id: root
+
+    // Connect to Mural Core Service via D-Bus
+    // Get current wallpaper path for this screen
+    // Display it via a Video or Image element
+
+    Rectangle {
+      anchors.fill: parent
+      color: "black"  // Fallback background
+    }
+
+    // The actual rendering is done by linux-wallpaperengine as a
+    // subprocess managed by Mural Core Service.
+    // The plugin's role is to signal KDE that Mural owns this wallpaper slot.
+  }
+
+  Design note: Unlike the existing wallpaper-engine-kde-plugin which
+  does rendering inside the plugin itself, Mural's plugin is a thin
+  shim. Rendering happens in linux-wallpaperengine (managed by core
+  service). The plugin just tells KDE "Mural owns this wallpaper."
+  This is simpler and avoids duplicating rendering logic.
+
+  Reference implementation to study:
+  https://github.com/catsout/wallpaper-engine-kde-plugin
+  Specifically: how it handles screen detection, multi-monitor,
+  and communicates wallpaper state to KDE.
+
+STEP 2.3 — Plasma Adapter Class (mural/adapters/plasma.py)
+
+  class PlasmaAdapter(BaseAdapter):
+
+    def apply_wallpaper(self, monitor: str, wallpaper_path: str):
+      # Tell Core Service to run linux-wallpaperengine for this monitor
+      # Core Service manages the subprocess
+      pass
+
+    def detect_monitors(self) -> list[Monitor]:
+      # Use kscreen-doctor or QScreen API
+      pass
+
+    def set_fullscreen_detection(self, enabled: bool):
+      # KWin scripting API to detect fullscreen windows
+      pass
+
+---
+
+PHASE 3 — GUI
+-------------
+Goal: A polished application window users can browse wallpapers in,
+configure monitors, and manage their library.
+
+MAIN WINDOW LAYOUT (mural/gui/mainwindow.py)
+
+  Three-tab layout (similar to Wallpaper Engine):
+
+  ┌─────────────────────────────────────────────────┐
+  │  [Library] [Platform] [Settings]                │
+  ├────────────────────┬────────────────────────────┤
+  │                    │                            │
+  │   Wallpaper Grid   │   Preview Panel            │
+  │   (scrollable)     │   ┌──────────────────┐     │
+  │                    │   │  Thumbnail/Video  │     │
+  │   [card][card]     │   └──────────────────┘     │
+  │   [card][card]     │   Name: ...                │
+  │   [card][card]     │   Type: Video/Scene/Web     │
+  │                    │   Author: ...               │
+  │                    │   Resolution: ...           │
+  │                    │                            │
+  │                    │   [Set as Wallpaper ▼]     │
+  │                    │   (dropdown: which monitor) │
+  └────────────────────┴────────────────────────────┘
+
+LIBRARY TAB (mural/gui/library_tab.py)
+  - Scan local directories for wallpapers
+  - Auto-detect Steam Workshop download paths
+  - Show wallpaper grid with thumbnail previews
+  - Filter by type (video, scene, web, image)
+  - "Add Folder" button to add custom directories
+
+PLATFORM TAB (mural/gui/platform_tab.py)
+  - Browse Mural content platform via REST API
+  - Search by name, tags, type
+  - Sort by newest, popular, trending
+  - Preview thumbnails (lazy-loaded for performance)
+  - Download button — saves to local library, updates Library tab
+
+SETTINGS TAB (mural/gui/settings_tab.py)
+  - Monitor list with current wallpaper assignment per monitor
+  - Playback settings: FPS limit, mute audio, pause on battery
+  - Fullscreen detection toggle
+  - Playlist configuration
+  - Performance profile (quality vs resource usage)
+  - Autostart toggle (enables/disables systemd service)
+
+WALLPAPER CARD WIDGET (mural/gui/wallpaper_card.py)
+  - Thumbnail image (static preview frame)
+  - Name label
+  - Type badge (VIDEO / SCENE / WEB / IMAGE)
+  - Hover effect showing duration or file size
+  - Click to select (updates preview panel)
+  - Double-click to apply to primary monitor
+
+SYSTEM TRAY ICON
+  - Show/hide main window
+  - Quick "Set Random Wallpaper" action
+  - Quick "Pause/Resume" action
+  - "Open Mural" to restore window
+  - Quit
+
+IPC BETWEEN GUI AND CORE SERVICE:
+  GUI talks to Core Service via D-Bus.
+  Never call linux-wallpaperengine directly from the GUI.
+  All wallpaper operations go through Core Service.
+
+  from dasbus.connection import SessionMessageBus
+  bus = SessionMessageBus()
+  core = bus.get_proxy("com.mural.Core", "/com/mural/Core")
+  core.SetWallpaper("DP-3", "/path/to/wallpaper")
+
+---
+
+PHASE 4 — CONTENT PLATFORM
+---------------------------
+Goal: A simple REST API and file hosting for community wallpapers.
+This is a SEPARATE deployable service from the desktop app.
+
+TECH STACK:
+  Framework:    FastAPI (Python)
+  Database:     PostgreSQL (Supabase free tier for v1)
+  File Storage: Cloudflare R2 (S3-compatible, zero egress fees)
+  Auth:         Simple JWT for creator accounts (not required to browse)
+  Hosting:      Hetzner VPS ($4-6/month) or Railway.app for v1
+
+ESTIMATED COSTS (v1):
+  Cloudflare R2: $0.015/GB stored. 1000 wallpapers @ 50MB = $0.75/month
+  Egress:        Free (Cloudflare R2 has no egress fees)
+  VPS/API host:  ~$5/month (Hetzner CX11 or Railway hobby)
+  Database:      Free (Supabase free tier, 500MB PostgreSQL)
+  Total v1:      ~$6/month
+
+API ENDPOINTS (platform/routes/):
+
+  GET  /wallpapers           List wallpapers (paginated)
+       ?page=1&limit=24
+       ?type=video|scene|web|image
+       ?sort=newest|popular|trending
+       ?tags=nature,abstract
+
+  GET  /wallpapers/{id}      Single wallpaper metadata + download URL
+  GET  /wallpapers/{id}/download  Redirect to R2 signed download URL
+  GET  /search?q=<query>     Full-text search
+
+  POST /upload               Upload new wallpaper (authenticated)
+  POST /auth/register        Creator account registration
+  POST /auth/login           JWT token
+
+WALLPAPER METADATA MODEL (platform/models.py):
+
+  {
+    "id": "uuid",
+    "title": "string",
+    "description": "string",
+    "author_id": "uuid",
+    "author_name": "string",
+    "type": "video|scene|web|image",
+    "tags": ["string"],
+    "resolution": "1920x1080|2560x1440|3440x1440|3840x2160",
+    "file_size_bytes": int,
+    "thumbnail_url": "string",
+    "download_url": "string",
+    "downloads": int,
+    "created_at": "datetime",
+    "updated_at": "datetime"
+  }
+
+MURAL OPEN WALLPAPER FORMAT (.mwp):
+  Community wallpapers uploaded to Mural use an open format.
+  A .mwp file is a ZIP archive containing:
+
+  manifest.json      # Required metadata (title, type, resolution, etc.)
+  preview.jpg        # Thumbnail image (max 1920x1080)
+  wallpaper.mp4      # For video type (or .webm)
+  scene/             # For scene type (linux-wallpaperengine scene format)
+  index.html         # For web type
+
+  manifest.json schema:
+  {
+    "mural_format": "1.0",
+    "type": "video|scene|web|image",
+    "title": "string",
+    "description": "string",
+    "author": "string",
+    "resolution": "3440x1440",
+    "fps": 60,
+    "audio": false,
+    "tags": ["abstract", "animated"]
+  }
+
+---
+
+PHASE 5 — ADDITIONAL DE ADAPTERS
+----------------------------------
+Implement after KDE Plasma adapter is stable and tested.
+
+HYPRLAND / WLROOTS (mural/adapters/wlr.py)
+  Protocol: wlr-layer-shell-unstable-v1
+  This is what linux-wallpaperengine's Wayland driver already uses.
+  The adapter is mostly plumbing — tell lwe to use Wayland mode,
+  parse monitor names via wlr-randr or the Hyprland IPC socket.
+
+  Hyprland exposes a Unix socket at $HYPRLAND_INSTANCE_SIGNATURE.
+  Use it to get monitor info:
+    echo -e '{"type": "monitors"}' | socat - \
+      UNIX-CONNECT:/tmp/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock
+
+XFCE / X11 (mural/adapters/x11.py)
+  Use X11 root window approach.
+  linux-wallpaperengine's X11 mode handles this via --screen-root.
+  Note: Does NOT work if a compositor is drawing the background.
+  XFCE with Xfwm4 compositor may need compositor disabled.
+
+GNOME (mural/adapters/gnome.py)
+  Hardest adapter. No public API for animated wallpapers.
+  Options:
+  1. GNOME Shell extension that creates a background actor
+  2. Hack: set a static frame as wallpaper, render animated on top
+  Do not implement until other adapters are stable.
+  Refer to: https://extensions.gnome.org for extension development docs.
+
+---
+
+KNOWN HARD PROBLEMS
+--------------------
+
+1. KWin version fragmentation
+   Plasma 6.x introduces breaking changes to wallpaper plugin API vs 5.x.
+   Plasma 6.5+ changed theme reactivity behavior.
+   SOLUTION: Target Plasma 6.0+ only. Use "X-Plasma-API-Minimum-Version": "6.0"
+   in metadata.json. Test against latest Plasma release in CI.
+
+2. Wayland layer ordering on KDE Plasma
+   linux-wallpaperengine on KDE Plasma Wayland may not sit correctly
+   behind desktop icons. The wlr-layer-shell protocol is supported by
+   KDE but behavior varies with KWin versions.
+   SOLUTION: Use the Plasma wallpaper plugin approach (Phase 2) instead
+   of raw layer-shell for KDE. Plugin approach has correct z-ordering.
+
+3. systemd service startup ordering
+   Mural Core Service must start after plasmashell is ready.
+   Starting too early means linux-wallpaperengine can't find the display.
+   SOLUTION: After=plasma-plasmashell.service in the unit file.
+   Also use graphical-session.target as the dependency target.
+
+4. D-Bus session availability in systemd user service
+   User services need DBUS_SESSION_BUS_ADDRESS to be available.
+   This is set by the graphical session but may not be inherited.
+   SOLUTION: Add to service unit:
+     Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%i/bus
+
+5. linux-wallpaperengine process cleanup
+   If Mural Core crashes, orphaned lwe processes may remain.
+   SOLUTION: Use subprocess.Popen with a process group. On service
+   restart, scan for orphaned lwe processes by checking /proc and
+   kill them before starting new ones.
+
+6. Monitor name inconsistency
+   Monitor names differ between tools: kscreen-doctor shows "HDMI-A-2"
+   but linux-wallpaperengine expects "HDMI-A-2" (matches this case).
+   XRandR may show "HDMI-2". Always normalize monitor names consistently.
+   SOLUTION: In MonitorManager, normalize all names to KDE/kscreen format.
+
+7. CEF (web wallpaper) memory usage
+   linux-wallpaperengine uses Chromium Embedded Framework for web wallpapers.
+   This adds ~200-300MB RAM per web wallpaper instance.
+   SOLUTION: Document this clearly. Offer a "low memory mode" that converts
+   web wallpapers to video captures instead.
+
+8. Flatpak sandboxing and subprocess access
+   Flatpak sandboxes restrict subprocess execution.
+   Calling linux-wallpaperengine from within a Flatpak sandbox requires
+   either portal APIs or --filesystem=host --talk-name=org.freedesktop.Flatpak
+   SOLUTION: For v1, distribute as AUR (no sandbox). For Flatpak v2,
+   use Flatpak portals or run lwe as a separate Flatpak that Mural calls.
+
+---
+
+DEVELOPMENT SETUP
+-----------------
+
+Prerequisites:
+  - CachyOS, Arch, or Manjaro (for easiest AUR access)
+  - KDE Plasma 6
+  - Python 3.11+
+  - linux-wallpaperengine installed (paru -S linux-wallpaperengine-git)
+  - Git
+
+Clone and setup:
+  git clone https://github.com/[YOUR_GITHUB]/mural.git
+  cd mural
+  python -m venv venv
+  source venv/bin/activate
+  pip install -r requirements-dev.txt
+
+Running the GUI in development:
+  python -m mural.main
+
+Running the Core Service manually (without systemd):
+  python -m mural.core.service --debug
+
+Testing the Plasma plugin without installing:
+  # Copy plugin to local Plasma plugins directory
+  mkdir -p ~/.local/share/plasma/wallpapers/
+  cp -r plasma-plugin ~/.local/share/plasma/wallpapers/com.mural.wallpaper
+
+  # Restart Plasma shell to pick up the plugin
+  systemctl --user restart plasma-plasmashell.service
+
+  # Check if it's detected
+  plasmoidviewer -a com.mural.wallpaper
+
+Running the content platform locally:
+  cd platform
+  pip install -r requirements.txt
+  uvicorn main:app --reload --port 8000
+  # API available at http://localhost:8000
+  # Docs at http://localhost:8000/docs
+
+---
+
+DEPENDENCIES (requirements.txt)
+--------------------------------
+
+PySide6>=6.6.0          # GUI framework
+dasbus>=1.7             # D-Bus IPC library
+requests>=2.31.0        # HTTP client for platform API
+Pillow>=10.0.0          # Image processing for thumbnails
+psutil>=5.9.0           # Process management for lwe subprocess
+watchdog>=3.0.0         # File system watching for library changes
+
+DEPENDENCIES (requirements-dev.txt)
+------------------------------------
+-r requirements.txt
+pytest>=7.4.0
+pytest-qt>=4.2.0        # Qt widget testing
+black>=23.0.0           # Code formatting
+ruff>=0.1.0             # Linting
+mypy>=1.5.0             # Type checking
+
+PLATFORM DEPENDENCIES (platform/requirements.txt)
+--------------------------------------------------
+fastapi>=0.104.0
+uvicorn>=0.24.0
+sqlalchemy>=2.0.0
+asyncpg>=0.29.0         # Async PostgreSQL driver
+boto3>=1.28.0           # S3-compatible client (for Cloudflare R2)
+python-jose>=3.3.0      # JWT authentication
+python-multipart>=0.0.6 # File upload handling
+Pillow>=10.0.0          # Thumbnail generation
+
+---
+
+IMMEDIATE NEXT STEPS FOR CLAUDE CODE
+--------------------------------------
+Hand this document to Claude Code with the following prompt:
+
+"I am building an open source Linux animated wallpaper platform called Mural.
+Read DEVGUIDE.txt and README.txt for full context.
+
+Start by creating the repository structure and implementing Phase 1 in order:
+
+1. Create the full folder structure from the REPOSITORY STRUCTURE section
+2. Implement mural/detection.py — DE and compositor auto-detection
+3. Implement mural/backend/runner.py — linux-wallpaperengine subprocess wrapper
+4. Implement mural/backend/discovery.py — find lwe binary and asset paths
+5. Implement mural/core/monitor_manager.py — monitor detection for KDE/X11
+6. Implement mural/core/service.py — D-Bus session service skeleton
+7. Create systemd/mural-core.service unit file
+8. Create a basic mural/main.py that launches the GUI and connects to the service
+9. Create requirements.txt and requirements-dev.txt
+
+Use Python 3.11+, PySide6, and dasbus.
+Follow GPL v3 license headers on all source files.
+Add type hints throughout.
+Add docstrings to all classes and public methods.
+After each file, confirm what was created and ask before proceeding to next."
+
+---
+
+REFERENCE LINKS
+---------------
+KDE Plasma Wallpaper Plugin API:
+  https://develop.kde.org/docs/plasma/
+
+KDE Plasma 6 Porting Guide:
+  https://develop.kde.org/docs/plasma/widget/porting_kf6/
+
+KDE Plasma Scripting API:
+  https://develop.kde.org/docs/plasma/scripting/api/
+
+linux-wallpaperengine:
+  https://github.com/Almamu/linux-wallpaperengine
+
+wallpaper-engine-kde-plugin (reference):
+  https://github.com/catsout/wallpaper-engine-kde-plugin
+
+simple-linux-wallpaperengine-gui (reference, study what it got wrong):
+  https://github.com/Unayung/simple-linux-wallpaperengine-gui
+
+dasbus (D-Bus library):
+  https://dasbus.readthedocs.io/
+
+Flatpak PySide6 BaseApp:
+  https://github.com/flathub/io.qt.PySide.BaseApp
+
+Cloudflare R2 Python SDK:
+  https://developers.cloudflare.com/r2/api/s3/sdk/
+
+FastAPI documentation:
+  https://fastapi.tiangolo.com/
+
+---
+
+END OF DEVGUIDE.txt
