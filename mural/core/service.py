@@ -53,6 +53,7 @@ from dasbus.typing import Str, Bool, List, Dict, Variant
 from mural.backend.discovery import discover, DiscoveryResult
 from mural.backend.runner import BackendRunner, WallpaperAssignment
 from mural.config import config as _cfg, DOWNLOAD_DIR
+from mural.core import playlist_store
 from mural.core.monitor_manager import MonitorManager
 from mural.detection import detect, DetectionResult
 
@@ -139,6 +140,26 @@ class IMuralCore:
         """
         ...
 
+    def GetPlaylist(self) -> List[Str]:
+        """Return the ordered playlist as a list of wallpaper directory paths."""
+        ...
+
+    def SetPlaylist(self, items: List[Str]) -> None:
+        """Replace the playlist with *items* and persist to disk."""
+        ...
+
+    def AddToPlaylist(self, path: Str) -> None:
+        """Append *path* to the playlist if not already present."""
+        ...
+
+    def GetPlaylistShuffle(self) -> Bool:
+        """Return ``True`` when shuffle mode is enabled."""
+        ...
+
+    def SetPlaylistShuffle(self, shuffle: Bool) -> None:
+        """Enable or disable shuffle mode."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Service implementation
@@ -177,6 +198,11 @@ class MuralCoreService(IMuralCore):
         self._runner: BackendRunner | None = None
         self._playlist_interval: int = 0
         self._playlist_timer_id: int | None = None
+
+        _pl = playlist_store.load()
+        self._playlist_items: list[str] = _pl["items"]
+        self._playlist_shuffle: bool = bool(_pl["shuffle"])
+        self._playlist_index: int = int(_pl["current_index"])
 
         _cfg.load()
         if discovery.binary_found:
@@ -388,22 +414,67 @@ class MuralCoreService(IMuralCore):
             logger.info("Playlist timer stopped")
 
     def _on_playlist_tick(self) -> bool:
-        """Timer callback: assign a random wallpaper to each connected monitor."""
-        wallpapers = self._discover_library_wallpapers()
-        if not wallpapers:
-            logger.warning("Playlist tick: no wallpapers found — skipping")
-            return True
-
+        """Timer callback: advance the playlist (or pick randomly) and apply."""
         if not self._monitor_manager.monitors:
             self._monitor_manager.detect()
+        monitors = self._monitor_manager.monitors
 
-        for monitor in self._monitor_manager.monitors:
-            wp = random.choice(wallpapers)
-            self._monitor_manager.assign_wallpaper(monitor.name, str(wp))
-            logger.info("Playlist: %s → %s", monitor.name, wp.name)
+        valid_playlist = [p for p in self._playlist_items if Path(p).exists()]
 
+        if valid_playlist:
+            if self._playlist_shuffle:
+                wp_path = random.choice(valid_playlist)
+            else:
+                self._playlist_index = (self._playlist_index + 1) % len(valid_playlist)
+                wp_path = valid_playlist[self._playlist_index]
+                self._persist_playlist()
+            logger.info("Playlist tick: %s", Path(wp_path).name)
+        else:
+            wallpapers = self._discover_library_wallpapers()
+            if not wallpapers:
+                logger.warning("Playlist tick: no wallpapers found — skipping")
+                return True
+            wp_path = str(random.choice(wallpapers))
+            logger.info("Playlist tick (library random): %s", Path(wp_path).name)
+
+        for monitor in monitors:
+            self._monitor_manager.assign_wallpaper(monitor.name, wp_path)
         self._apply_all()
-        return True  # keep the timer alive
+        return True
+
+    def _persist_playlist(self) -> None:
+        playlist_store.save({
+            "items": self._playlist_items,
+            "shuffle": self._playlist_shuffle,
+            "current_index": self._playlist_index,
+        })
+
+    # ------------------------------------------------------------------
+    # Playlist D-Bus implementations
+    # ------------------------------------------------------------------
+
+    def GetPlaylist(self) -> list[str]:  # type: ignore[override]
+        return list(self._playlist_items)
+
+    def SetPlaylist(self, items: list[str]) -> None:  # type: ignore[override]
+        self._playlist_items = list(items)
+        self._playlist_index = 0
+        self._persist_playlist()
+        logger.info("SetPlaylist: %d items", len(items))
+
+    def AddToPlaylist(self, path: str) -> None:  # type: ignore[override]
+        if path not in self._playlist_items:
+            self._playlist_items.append(path)
+            self._persist_playlist()
+            logger.info("AddToPlaylist: %s", Path(path).name)
+
+    def GetPlaylistShuffle(self) -> bool:  # type: ignore[override]
+        return self._playlist_shuffle
+
+    def SetPlaylistShuffle(self, shuffle: bool) -> None:  # type: ignore[override]
+        self._playlist_shuffle = shuffle
+        self._persist_playlist()
+        logger.info("SetPlaylistShuffle: %s", shuffle)
 
 
 # ---------------------------------------------------------------------------

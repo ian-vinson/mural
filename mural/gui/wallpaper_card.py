@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -46,7 +46,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPixmap,
 )
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import QMenu, QSizePolicy, QWidget
 
 # Card geometry constants
 _CARD_W = 200
@@ -140,6 +140,8 @@ class WallpaperCard(QWidget):
     selected: ClassVar[Signal] = Signal(WallpaperInfo)
     # Emitted when the card is double-clicked.
     apply_requested: ClassVar[Signal] = Signal(WallpaperInfo)
+    # Emitted when "Add to Playlist" is chosen from the right-click menu.
+    add_to_playlist_requested: ClassVar[Signal] = Signal(WallpaperInfo)
 
     _PLACEHOLDER: QPixmap | None = None  # shared across all instances
 
@@ -344,6 +346,18 @@ class WallpaperCard(QWidget):
         self._hovered = False
         self.update()
         super().leaveEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # type: ignore[override]
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background: #1E1E2E; color: #e0e0e0; border: 1px solid #333; }"
+            "QMenu::item:selected { background: #2979FF; color: #fff; }"
+            "QMenu::item { padding: 4px 16px; }"
+        )
+        add_action = menu.addAction("Add to Playlist")
+        chosen = menu.exec(event.globalPos())
+        if chosen is add_action:
+            self.add_to_playlist_requested.emit(self._info)
 
     # ------------------------------------------------------------------
     # Thumbnail loading

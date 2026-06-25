@@ -416,6 +416,7 @@ class LibraryTab(QWidget):
     # Forwarded from individual WallpaperCards.
     wallpaper_selected: ClassVar[Signal] = Signal(WallpaperInfo)
     wallpaper_apply_requested: ClassVar[Signal] = Signal(WallpaperInfo)
+    add_to_playlist_requested: ClassVar[Signal] = Signal(WallpaperInfo)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -723,6 +724,7 @@ class LibraryTab(QWidget):
         card = WallpaperCard(info)
         card.selected.connect(self._on_card_selected)
         card.apply_requested.connect(self.wallpaper_apply_requested)
+        card.add_to_playlist_requested.connect(self.add_to_playlist_requested)
         self._grid.add_card(card)
         self._visible_cards.append(card)
 

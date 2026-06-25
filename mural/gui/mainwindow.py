@@ -76,6 +76,7 @@ from PySide6.QtWidgets import (
 
 from mural.gui.library_tab import LibraryTab
 from mural.gui.platform_tab import PlatformTab
+from mural.gui.playlist_tab import PlaylistTab
 from mural.gui.settings_tab import SettingsTab
 from mural.gui.wallpaper_card import WallpaperInfo
 
@@ -442,14 +443,16 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         self._splitter.addWidget(self._stack)
 
-        # Build the three tab contents
+        # Build the four tab contents
         self._library_tab = LibraryTab()
         self._platform_tab = PlatformTab()
+        self._playlist_tab = PlaylistTab(core_proxy=self._core)
         self._settings_tab = SettingsTab(core_proxy=self._core)
 
         self._stack.addWidget(self._library_tab)   # index 0
         self._stack.addWidget(self._platform_tab)  # index 1
-        self._stack.addWidget(self._settings_tab)  # index 2
+        self._stack.addWidget(self._playlist_tab)  # index 2
+        self._stack.addWidget(self._settings_tab)  # index 3
 
         # Right: preview panel
         self._preview = _PreviewPanel(
@@ -490,7 +493,7 @@ class MainWindow(QMainWindow):
         )
 
         self._tab_btns: list[QPushButton] = []
-        for i, label in enumerate(("Library", "Platform", "Settings")):
+        for i, label in enumerate(("Library", "Platform", "Playlist", "Settings")):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setChecked(i == 0)
@@ -530,10 +533,13 @@ class MainWindow(QMainWindow):
         plat_action = QAction("&Platform", self)
         plat_action.setShortcut(QKeySequence("Ctrl+2"))
         plat_action.triggered.connect(lambda: self._switch_tab(1))
+        play_action = QAction("P&laylist", self)
+        play_action.setShortcut(QKeySequence("Ctrl+3"))
+        play_action.triggered.connect(lambda: self._switch_tab(2))
         sett_action = QAction("&Settings", self)
-        sett_action.setShortcut(QKeySequence("Ctrl+3"))
-        sett_action.triggered.connect(lambda: self._switch_tab(2))
-        view_menu.addActions([lib_action, plat_action, sett_action])
+        sett_action.setShortcut(QKeySequence("Ctrl+4"))
+        sett_action.triggered.connect(lambda: self._switch_tab(3))
+        view_menu.addActions([lib_action, plat_action, play_action, sett_action])
 
         service_menu = menubar.addMenu("&Service")
         start_action = QAction("Start Core Service", self)
@@ -561,6 +567,9 @@ class MainWindow(QMainWindow):
         self._platform_tab.wallpaper_selected.connect(self._preview.show_wallpaper)
         self._platform_tab.wallpaper_apply_requested.connect(self._on_quick_apply)
 
+        # Right-click "Add to Playlist" in Library → playlist tab.
+        self._library_tab.add_to_playlist_requested.connect(self._playlist_tab.add_item)
+
         # Downloaded platform wallpaper → refresh local library.
         self._platform_tab.wallpaper_downloaded.connect(self._on_download_complete)
 
@@ -577,8 +586,8 @@ class MainWindow(QMainWindow):
         for i, btn in enumerate(self._tab_btns):
             btn.setChecked(i == index)
 
-        # Hide preview panel when Settings is active (index 2).
-        show_preview = index != 2
+        # Hide preview panel when Playlist (2) or Settings (3) is active.
+        show_preview = index not in (2, 3)
         self._splitter.widget(1).setVisible(show_preview)
 
     # ------------------------------------------------------------------
