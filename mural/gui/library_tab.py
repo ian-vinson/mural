@@ -34,7 +34,7 @@ import os
 from pathlib import Path
 from typing import ClassVar
 
-from PySide6.QtCore import QSize, Qt, QThread, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -49,6 +49,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from shiboken6 import isValid
 
 from mural.gui.wallpaper_card import WallpaperCard, WallpaperInfo
 
@@ -271,70 +273,81 @@ class _CardGrid(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
-        self._rows: list[QHBoxLayout] = []
         self._current_cols = 0
 
+        # Single timer coalesces rapid add_card() calls and resize events.
+        self._relayout_timer = QTimer(self)
+        self._relayout_timer.setSingleShot(True)
+        self._relayout_timer.setInterval(50)
+        self._relayout_timer.timeout.connect(self._relayout)
+
     def add_card(self, card: WallpaperCard) -> None:
-        """Append *card* and re-flow the grid."""
+        """Append *card* and schedule a deferred re-flow."""
+        card.setParent(self)
+        card.hide()  # hidden until _relayout() places it
         self._cards.append(card)
-        self._relayout()
+        self._relayout_timer.start()
 
     def clear_cards(self) -> None:
         """Remove all cards from the grid."""
+        self._relayout_timer.stop()
         for card in self._cards:
             card.setParent(None)  # type: ignore[arg-type]
             card.deleteLater()
         self._cards.clear()
-        # Clear row widgets
-        while self._layout.count():
-            item = self._layout.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
-        self._rows.clear()
+        self._destroy_rows()
+        self._current_cols = 0
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        self._relayout()
+        self._relayout_timer.start()
+
+    def _destroy_rows(self) -> None:
+        """Remove all row widgets from the layout and schedule their deletion.
+
+        Cards must already be reparented away from the row widgets before
+        this is called, otherwise Qt will delete them as children.
+        """
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            w = item.widget() if item else None
+            if w:
+                w.deleteLater()
 
     def _relayout(self) -> None:
         """Re-flow cards into rows based on the current widget width."""
         available = max(self.width(), _CARD_W + _CARD_SPACING)
         cols = max(1, (available + _CARD_SPACING) // (_CARD_W + _CARD_SPACING))
-
-        if cols == self._current_cols and len(self._cards) == sum(
-            row.count() for row in self._rows
-        ):
-            return  # nothing changed
-
         self._current_cols = cols
 
-        # Remove existing row widgets from layout.
-        while self._layout.count():
-            item = self._layout.takeAt(0)
-            if item and item.widget():
-                item.widget().setParent(None)  # type: ignore[arg-type]
+        # Reparent every card to self BEFORE destroying row widgets.
+        # addWidget() transfers Qt parent ownership to the row; if we delete
+        # the row first the cards go with it (shiboken crash).
+        for card in self._cards:
+            if isValid(card):
+                card.setParent(self)  # type: ignore[arg-type]
 
-        self._rows.clear()
+        self._destroy_rows()
 
-        # Re-add all cards in new rows.
+        # Rebuild rows with the correct column count.
         row_widget: QWidget | None = None
         row_layout: QHBoxLayout | None = None
         for i, card in enumerate(self._cards):
             if i % cols == 0:
-                row_widget = QWidget()
+                row_widget = QWidget(self)
                 row_layout = QHBoxLayout(row_widget)
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(_CARD_SPACING)
                 row_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
                 self._layout.addWidget(row_widget)
-                self._rows.append(row_layout)
-            row_layout.addWidget(card)  # type: ignore[union-attr]
+            if isValid(card):
+                row_layout.addWidget(card)  # type: ignore[union-attr]
+                card.show()
 
         self._layout.addStretch()
 
-        # Recompute preferred height.
-        n_rows = (len(self._cards) + cols - 1) // cols
-        total_h = n_rows * _CARD_H + (n_rows - 1) * _CARD_SPACING
+        n_rows = (len(self._cards) + cols - 1) // cols if self._cards else 0
+        total_h = n_rows * _CARD_H + max(0, n_rows - 1) * _CARD_SPACING
         self.setMinimumHeight(max(total_h, 0))
 
 
