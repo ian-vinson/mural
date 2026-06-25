@@ -30,8 +30,6 @@ Start without systemd (for development):
     python -m mural.core.service [--debug]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging

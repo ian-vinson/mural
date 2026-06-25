@@ -39,7 +39,7 @@ echo "Installing Mural ..."
 # ---------------------------------------------------------------------------
 echo "[1/6] Creating virtual environment at ${VENV_DIR} ..."
 mkdir -p "${HOME}/.local/share/mural"
-python3 -m venv "${VENV_DIR}"
+python3 -m venv --system-site-packages "${VENV_DIR}"
 VENV_PIP="${VENV_DIR}/bin/pip"
 VENV_PYTHON="${VENV_DIR}/bin/python"
 
