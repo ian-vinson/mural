@@ -351,6 +351,11 @@ class _CardGrid(QWidget):
         super().resizeEvent(event)
         self._relayout_timer.start()
 
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        # Defer one tick so the scroll-area has assigned our final width.
+        QTimer.singleShot(0, self._relayout)
+
     def _destroy_rows(self) -> None:
         """Remove all row widgets from the layout and schedule their deletion.
 
@@ -366,7 +371,7 @@ class _CardGrid(QWidget):
     def _relayout(self) -> None:
         """Re-flow cards into rows based on the current widget width."""
         available = max(self.width(), _CARD_W + _CARD_SPACING)
-        cols = max(1, (available + _CARD_SPACING) // (_CARD_W + _CARD_SPACING))
+        cols = max(2, (available + _CARD_SPACING) // (_CARD_W + _CARD_SPACING))
         self._current_cols = cols
 
         # Reparent every card to self BEFORE destroying row widgets.

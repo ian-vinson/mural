@@ -52,6 +52,27 @@ _LWE_PROCESS_NAME = "linux-wallpaperengine"
 _SIGTERM_TIMEOUT = 3.0  # seconds to wait after SIGTERM before SIGKILL
 
 
+def _kill_process(process: "subprocess.Popen[bytes]") -> None:
+    """Terminate *process*'s process group; escalate to SIGKILL after timeout."""
+    if process.poll() is not None:
+        return
+    pid = process.pid
+    try:
+        pgid = os.getpgid(pid)
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=_SIGTERM_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
 @dataclass
 class WallpaperAssignment:
     """A single monitor-to-wallpaper mapping for lwe.
@@ -145,18 +166,32 @@ class BackendRunner:
         if not self._binary.exists():
             raise FileNotFoundError(f"lwe binary not found: {self._binary}")
 
-        self.kill_orphans()
-
         with self._lock:
-            if self._process and self._process.poll() is None:
-                logger.debug("Stopping existing lwe process before restart")
-                self._intentional_stop = True
-                self._stop_process()
-
+            old_process = (
+                self._process
+                if self._process and self._process.poll() is None
+                else None
+            )
             self._assignments = list(assignments)
             self._stop_event.clear()
             self._intentional_stop = False
-            self._start_process()
+
+            if old_process is not None:
+                # Overlap transition: spawn new lwe without stopping the old
+                # one first so there is no rendering gap. Pre-spawn guard
+                # skips old_pid to keep it alive during the handoff.
+                self._start_process(exclude_pid=old_process.pid)
+            else:
+                # First launch: clean up leftover orphans, then spawn.
+                self.kill_orphans()
+                self._start_process()
+
+        if old_process is not None:
+            # Sleep outside the lock so other callers aren't blocked.
+            # 400 ms gives the new lwe time to initialize and start rendering.
+            time.sleep(0.4)
+            _kill_process(old_process)
+            logger.debug("Overlap transition: retired old lwe (pid=%d)", old_process.pid)
 
     def stop(self) -> None:
         """Stop the lwe process gracefully and join the monitor thread."""
@@ -232,7 +267,7 @@ class BackendRunner:
 
         return cmd
 
-    def _start_process(self) -> None:
+    def _start_process(self, exclude_pid: int | None = None) -> None:
         """Spawn the lwe subprocess in its own process group."""
         cmd = self._build_command(self._assignments)
         logger.info("Starting lwe: %s", " ".join(cmd))
@@ -282,6 +317,8 @@ class BackendRunner:
                     _LWE_PROCESS_NAME in str(arg) for arg in cmdline
                 )
                 if is_lwe and uids and uids.real == current_uid:
+                    if exclude_pid is not None and proc.pid == exclude_pid:
+                        continue  # keep old process alive during overlap transition
                     logger.warning("Pre-spawn guard: killing lwe (pid=%d)", proc.pid)
                     try:
                         pgid = os.getpgid(proc.pid)
@@ -371,6 +408,11 @@ class BackendRunner:
             except Exception:
                 pass
 
+        # If self._process has been replaced (overlap transition), this
+        # monitor was watching the retired process — exit without restarting.
+        if self._process is not process:
+            return
+
         # Intentional stop (stop()/start()/restart() killed lwe) or clean
         # exit (lwe exits 0 on SIGTERM) — no auto-restart in either case.
         if self._intentional_stop or returncode == 0:
@@ -417,12 +459,16 @@ class BackendRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def kill_orphans() -> int:
+    def kill_orphans(exclude_pid: int | None = None) -> int:
         """Kill any lwe processes not owned by this runner.
 
         Scans ``/proc`` via psutil for processes named
         ``linux-wallpaperengine`` and terminates them.  Called at service
         startup to clean up after a previous crash.
+
+        Args:
+            exclude_pid: PID to skip (used when an old process is being
+                retired via overlap transition and must stay alive briefly).
 
         Returns:
             Number of orphaned processes killed.
@@ -436,6 +482,8 @@ class BackendRunner:
                     _LWE_PROCESS_NAME in str(arg) for arg in cmdline
                 )
                 if is_lwe:
+                    if exclude_pid is not None and proc.pid == exclude_pid:
+                        continue
                     logger.warning(
                         "Killing orphaned lwe process (pid=%d)", proc.pid
                     )
