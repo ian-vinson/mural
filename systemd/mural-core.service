@@ -30,8 +30,19 @@ PartOf=graphical-session.target
 # yet running, but do not fail if it does not exist.
 Wants=plasma-plasmashell.service
 
+# Cap restart attempts to avoid thrashing if lwe is not installed.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
 [Service]
 Type=simple
+
+# Pull display-server variables from the current session environment
+# into the systemd user manager *before* the service starts.  This is a
+# belt-and-suspenders measure: KDE Plasma (and most compositors) already
+# call `import-environment` during login, but this guarantees the vars
+# are present even when starting the service manually mid-session.
+ExecStartPre=/usr/bin/systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE
 
 ExecStart=%h/.local/bin/mural-core
 
@@ -44,10 +55,12 @@ ExecStart=%h/.local/bin/mural-core
 # -----------------------------------------------------------------------
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 
-# Ensure DISPLAY and WAYLAND_DISPLAY are forwarded from the session
-# environment when set via `systemctl --user import-environment`.
-# These are needed by linux-wallpaperengine.
-PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR
+# Forward display-server variables from the session environment.
+# PassEnvironment applies the values that were imported into the user
+# manager (via import-environment above or by the session manager at
+# login).  DBUS_SESSION_BUS_ADDRESS is also listed here as a fallback;
+# the explicit Environment= line above takes precedence if set.
+PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_CURRENT_DESKTOP XDG_SESSION_TYPE DBUS_SESSION_BUS_ADDRESS
 
 # -----------------------------------------------------------------------
 # Process management
@@ -67,10 +80,6 @@ TimeoutStopSec=8
 # Restart on failure but not on clean exit (e.g. explicit systemctl stop).
 Restart=on-failure
 RestartSec=3
-
-# Cap restart attempts to avoid thrashing if lwe is not installed.
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 # Route stdout/stderr to the systemd journal.  View with:
 #   journalctl --user -u mural-core.service -f

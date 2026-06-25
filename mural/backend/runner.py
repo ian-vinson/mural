@@ -197,11 +197,44 @@ class BackendRunner:
         cmd = self._build_command(self._assignments)
         logger.info("Starting lwe: %s", " ".join(cmd))
 
+        # Explicitly forward display-server variables into the child env.
+        # mural-core may be started as a systemd user service before the
+        # session manager has run `import-environment`, so these vars may
+        # not be present in os.environ even though they exist in the
+        # graphical session.  Copying os.environ and re-asserting the
+        # specific vars makes the intent clear and ensures lwe can reach
+        # the display server regardless of how mural-core was launched.
+        env = os.environ.copy()
+        for var in (
+            "WAYLAND_DISPLAY",
+            "DISPLAY",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_SESSION_TYPE",
+        ):
+            if var in os.environ:
+                env[var] = os.environ[var]
+            else:
+                logger.debug("lwe env: %s is not set", var)
+
+        # lwe requires XDG_SESSION_TYPE to select its display backend.
+        # logind/PAM sets it to "unspecified" for user sessions that
+        # aren't full graphical logins, which lwe rejects.  Override it
+        # with the actual session type inferred from display variables.
+        if env.get("XDG_SESSION_TYPE") not in ("wayland", "x11", "mir"):
+            if env.get("WAYLAND_DISPLAY"):
+                env["XDG_SESSION_TYPE"] = "wayland"
+                logger.debug("lwe env: inferred XDG_SESSION_TYPE=wayland from WAYLAND_DISPLAY")
+            elif env.get("DISPLAY"):
+                env["XDG_SESSION_TYPE"] = "x11"
+                logger.debug("lwe env: inferred XDG_SESSION_TYPE=x11 from DISPLAY")
+
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             preexec_fn=os.setsid,  # new process group → clean kill
+            env=env,
         )
         self._start_time = time.monotonic()
         logger.info("lwe started (pid=%d)", self._process.pid)
@@ -258,6 +291,16 @@ class BackendRunner:
             return
 
         returncode = process.wait()
+
+        # Log whatever lwe wrote to stderr so failures are diagnosable.
+        if process.stderr:
+            try:
+                stderr_out = process.stderr.read().decode("utf-8", errors="replace").strip()
+                if stderr_out:
+                    for line in stderr_out.splitlines():
+                        logger.warning("lwe stderr: %s", line)
+            except Exception:
+                pass
 
         if self._stop_event.is_set():
             # Clean shutdown — nothing to do.
