@@ -154,6 +154,22 @@ class IMuralCore:
         """Set per-playlist rotation interval (0 = use global setting)."""
         ...
 
+    def SetItemDuration(self, playlist_id: Str, index: int, minutes: int) -> Bool:
+        """Set per-item duration override for item at *index* (0 = playlist default)."""
+        ...
+
+    # ------------------------------------------------------------------
+    # Power and app-rule status
+    # ------------------------------------------------------------------
+
+    def GetPowerStatus(self) -> Str:
+        """Return current power source: ``"ac"``, ``"battery"``, or ``"unknown"``."""
+        ...
+
+    def GetAppRuleStatus(self) -> Str:
+        """Return ``"paused:<appname>"`` or ``"running"``."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Service implementation
@@ -194,7 +210,16 @@ class MuralCoreService(IMuralCore):
         self._playlists = PlaylistStore()
         self._playlists.load()
         self._tick_timer_id: int | None = None
-        self._playlist_last_tick: dict[str, float] = {}  # playlist_id → epoch
+        self._playlist_last_tick: dict[str, float] = {}      # playlist_id → epoch
+        self._playlist_next_interval: dict[str, int] = {}    # playlist_id → effective minutes
+
+        # Pause state: multiple reasons can suspend lwe simultaneously.
+        # lwe only runs when this set is empty.
+        self._pause_reasons: set[str] = set()  # {"battery", "app"}
+        self._battery_on: bool | None = None   # last known battery state
+        self._app_pause_name: str = ""         # app name causing pause
+        self._battery_timer_id: int | None = None
+        self._app_timer_id: int | None = None
 
         _cfg.load()
         if discovery.binary_found:
@@ -213,18 +238,33 @@ class MuralCoreService(IMuralCore):
     # ------------------------------------------------------------------
 
     def initialise(self) -> None:
-        """Kill orphans, detect monitors, apply saved wallpapers, start timer."""
+        """Kill orphans, detect monitors, apply saved wallpapers, start timers."""
         if self._runner:
             BackendRunner.kill_orphans()
 
         self._monitor_manager.detect()
         self._monitor_manager.load_assignments()
+
+        # Prime pause conditions before starting lwe so we don't start
+        # then immediately stop when on battery or a ruled app is running.
+        self._check_battery_pause(initial=True)
+        self._check_app_rule_pause(initial=True)
+
         self._apply_all()
         self._update_tick_timer()
 
+        self._battery_timer_id = GLib.timeout_add_seconds(60, self._on_battery_tick)
+        self._app_timer_id = GLib.timeout_add_seconds(10, self._on_app_rule_tick)
+
     def shutdown(self) -> None:
-        """Stop the playlist timer and lwe subprocess."""
+        """Stop all timers and the lwe subprocess."""
         self._stop_tick_timer()
+        if self._battery_timer_id is not None:
+            GLib.source_remove(self._battery_timer_id)
+            self._battery_timer_id = None
+        if self._app_timer_id is not None:
+            GLib.source_remove(self._app_timer_id)
+            self._app_timer_id = None
         if self._runner and self._runner.is_running():
             logger.info("Stopping lwe subprocess")
             self._runner.stop()
@@ -265,7 +305,7 @@ class MuralCoreService(IMuralCore):
         if not self._runner:
             return
         if enabled:
-            self._apply_all()
+            self._apply_all()  # _apply_all checks _pause_reasons internally
         else:
             self._runner.stop()
 
@@ -291,6 +331,9 @@ class MuralCoreService(IMuralCore):
         if self._runner:
             self._runner.update_playback(fps_limit, mute_audio, fullscreen_pause)
         self._update_tick_timer()
+        # Re-evaluate pause conditions with updated config.
+        self._check_battery_pause()
+        self._check_app_rule_pause()
 
     # ------------------------------------------------------------------
     # Playlist D-Bus — read
@@ -343,6 +386,7 @@ class MuralCoreService(IMuralCore):
             return False
         if wallpaper_path not in pl.wallpaper_paths:
             pl.wallpaper_paths.append(wallpaper_path)
+            pl.item_durations.append(0)  # default: use playlist interval
             self._playlists.save()
             logger.info("AddToPlaylist %s: %s", pl.name, Path(wallpaper_path).name)
         self._update_tick_timer()
@@ -353,6 +397,9 @@ class MuralCoreService(IMuralCore):
         if not pl or not (0 <= index < len(pl.wallpaper_paths)):
             return False
         removed = pl.wallpaper_paths.pop(index)
+        pl._sync_durations()
+        if index < len(pl.item_durations):
+            pl.item_durations.pop(index)
         pl.current_index = max(0, min(pl.current_index, len(pl.wallpaper_paths) - 1))
         self._playlists.save()
         logger.info("RemoveFromPlaylist %s: index %d (%s)", pl.name, index, Path(removed).name)
@@ -367,7 +414,10 @@ class MuralCoreService(IMuralCore):
             return False
         item = pl.wallpaper_paths.pop(from_index)
         pl.wallpaper_paths.insert(to_index, item)
-        pl.current_index = 0  # reset position after reorder
+        pl._sync_durations()
+        dur = pl.item_durations.pop(from_index)
+        pl.item_durations.insert(to_index, dur)
+        pl.current_index = 0
         self._playlists.save()
         return True
 
@@ -431,6 +481,8 @@ class MuralCoreService(IMuralCore):
             return False
         if not self._enabled:
             return False
+        if self._pause_reasons:
+            return False  # battery or app rule has suspended playback
 
         active = self._monitor_manager.active_assignments()
         if not active:
@@ -468,6 +520,106 @@ class MuralCoreService(IMuralCore):
                 logger.debug("pywal: not available or returned non-zero")
 
         threading.Thread(target=_worker, daemon=True, name="pywal-worker").start()
+
+    # ------------------------------------------------------------------
+    # Power / app-rule pause management
+    # ------------------------------------------------------------------
+
+    def _check_battery_pause(self, initial: bool = False) -> None:
+        """Detect battery state and add/remove "battery" from _pause_reasons."""
+        import psutil
+        battery = psutil.sensors_battery()
+        on_battery = battery is not None and not battery.power_plugged
+        if on_battery == self._battery_on:
+            return  # no transition
+        self._battery_on = on_battery
+        if on_battery and bool(_cfg.get("pause_on_battery", True)):
+            self._pause_reasons.add("battery")
+            if not initial:
+                logger.info("Battery: pausing lwe")
+                if self._runner and self._runner.is_running():
+                    self._runner.stop()
+        else:
+            self._pause_reasons.discard("battery")
+            if not initial:
+                logger.info("Battery: resuming lwe")
+                self._apply_all()
+
+    def _check_app_rule_pause(self, initial: bool = False) -> None:
+        """Check running processes against pause_app_list; update _pause_reasons."""
+        import psutil
+        app_list = [
+            a.lower().strip()
+            for a in _cfg.get("pause_app_list", [])
+            if a.strip()
+        ]
+        if not app_list:
+            was = "app" in self._pause_reasons
+            self._app_pause_name = ""
+            self._pause_reasons.discard("app")
+            if was and not initial:
+                logger.info("AppRule: resuming (no rules configured)")
+                self._apply_all()
+            return
+
+        found: str | None = None
+        for proc in psutil.process_iter(["name"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                if name in app_list:
+                    found = proc.info.get("name") or name
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        if found:
+            if "app" not in self._pause_reasons:
+                self._app_pause_name = found
+                self._pause_reasons.add("app")
+                if not initial:
+                    logger.info("AppRule: pausing for %s", found)
+                    if self._runner and self._runner.is_running():
+                        self._runner.stop()
+        else:
+            was = "app" in self._pause_reasons
+            self._app_pause_name = ""
+            self._pause_reasons.discard("app")
+            if was and not initial:
+                logger.info("AppRule: resuming")
+                self._apply_all()
+
+    def _on_battery_tick(self) -> bool:
+        self._check_battery_pause()
+        return True
+
+    def _on_app_rule_tick(self) -> bool:
+        self._check_app_rule_pause()
+        return True
+
+    # ------------------------------------------------------------------
+    # New D-Bus methods — power / app-rule / per-item duration
+    # ------------------------------------------------------------------
+
+    def GetPowerStatus(self) -> str:  # type: ignore[override]
+        import psutil
+        battery = psutil.sensors_battery()
+        if battery is None:
+            return "unknown"
+        return "battery" if not battery.power_plugged else "ac"
+
+    def GetAppRuleStatus(self) -> str:  # type: ignore[override]
+        if self._app_pause_name:
+            return f"paused:{self._app_pause_name}"
+        return "running"
+
+    def SetItemDuration(self, playlist_id: str, index: int, minutes: int) -> bool:  # type: ignore[override]
+        pl = self._playlists.get(playlist_id)
+        if not pl or not (0 <= index < len(pl.wallpaper_paths)):
+            return False
+        pl._sync_durations()
+        pl.item_durations[index] = max(0, minutes)
+        self._playlists.save()
+        return True
 
     # ------------------------------------------------------------------
     # Playlist tick timer
@@ -513,17 +665,21 @@ class MuralCoreService(IMuralCore):
                 continue
 
             last = self._playlist_last_tick.get(pl.id, 0.0)
-            if now - last < effective_minutes * 60:
+            next_dur = self._playlist_next_interval.get(pl.id, effective_minutes)
+            if now - last < next_dur * 60:
                 continue
 
             # Time to advance this playlist.
-            wp_path = pl.next_wallpaper()
+            wp_path, item_dur = pl.next_item()
             if wp_path is None:
                 logger.warning("Playlist %r: no valid wallpapers on disk", pl.name)
                 continue
 
             self._playlist_last_tick[pl.id] = now
-            self._playlists.save()  # persist updated current_index
+            # Record effective duration for next tick interval.
+            eff_next = item_dur if item_dur > 0 else effective_minutes
+            self._playlist_next_interval[pl.id] = eff_next
+            self._playlists.save()
 
             for monitor in pl.monitor_assignments:
                 self._monitor_manager.assign_wallpaper(monitor, wp_path)
@@ -532,8 +688,6 @@ class MuralCoreService(IMuralCore):
             applied_any = True
 
         if applied_any:
-            # _apply_all() calls runner.start() which always stops+restarts lwe
-            # with the new assignments, even if lwe is already running.
             self._apply_all()
 
         return True  # keep the GLib timer alive

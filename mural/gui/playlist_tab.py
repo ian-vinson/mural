@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QModelIndex
 from PySide6.QtGui import QIcon, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -219,7 +219,36 @@ class PlaylistTab(QWidget):
             "QListWidget::item:selected { background: #2979FF; color: #fff; }"
             "QListWidget::item:alternate { background: #1A1A2E; }"
         )
+        self._wp_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._wp_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._wp_list.currentRowChanged.connect(self._on_wp_row_changed)
+        self._wp_list.model().rowsMoved.connect(self._on_wp_reordered)
+
+        # Empty-state overlay shown when the playlist has no wallpapers.
+        self._wp_empty_label = QLabel(
+            "No wallpapers yet — add from the Library tab or click Add"
+        )
+        self._wp_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._wp_empty_label.setStyleSheet("color: #555; font-size: 12px;")
+        self._wp_empty_label.hide()
+
         wp_layout.addWidget(self._wp_list, 1)
+        wp_layout.addWidget(self._wp_empty_label, 1)
+
+        # Per-item duration override
+        dur_row = QHBoxLayout()
+        dur_row.addWidget(QLabel("Duration for selected:"))
+        self._item_dur_spin = QSpinBox()
+        self._item_dur_spin.setRange(0, 1440)
+        self._item_dur_spin.setSuffix(" min")
+        self._item_dur_spin.setFixedWidth(90)
+        self._item_dur_spin.setToolTip("0 = use playlist default interval")
+        self._item_dur_spin.setEnabled(False)
+        self._item_dur_spin.valueChanged.connect(self._on_item_duration_changed)
+        dur_row.addWidget(self._item_dur_spin)
+        dur_row.addWidget(QLabel("(0 = playlist default)"))
+        dur_row.addStretch()
+        wp_layout.addLayout(dur_row)
 
         wp_btn_row = QHBoxLayout()
         add_wp_btn = QPushButton("+ Add Wallpaper")
@@ -278,12 +307,20 @@ class PlaylistTab(QWidget):
     def _get_playlist(self, playlist_id: str) -> dict | None:
         return next((p for p in self._playlists if p["id"] == playlist_id), None)
 
+    @staticmethod
+    def _pl_display_text(pl: dict) -> str:
+        """Return display string: name + optional shuffle badge + item count."""
+        name = pl.get("name", "Untitled")
+        count = len(pl.get("wallpaper_paths", []))
+        badge = " ⇌" if pl.get("shuffle", False) else ""
+        return f"{name}{badge}  ({count})"
+
     def _rebuild_pl_list(self) -> None:
         prev_id = self._selected_id
         self._pl_list.blockSignals(True)
         self._pl_list.clear()
         for pl in self._playlists:
-            item = QListWidgetItem(pl["name"])
+            item = QListWidgetItem(self._pl_display_text(pl))
             item.setData(Qt.ItemDataRole.UserRole, pl["id"])
             self._pl_list.addItem(item)
         self._pl_list.blockSignals(False)
@@ -346,16 +383,25 @@ class PlaylistTab(QWidget):
 
         # Wallpaper list
         self._wp_list.clear()
-        for path in pl.get("wallpaper_paths", []):
-            self._add_wp_item(path)
+        paths = pl.get("wallpaper_paths", [])
+        durations = pl.get("item_durations", [])
+        for i, path in enumerate(paths):
+            dur = durations[i] if i < len(durations) else 0
+            self._add_wp_item(path, dur)
+
+        self._item_dur_spin.blockSignals(True)
+        self._item_dur_spin.setValue(0)
+        self._item_dur_spin.blockSignals(False)
+        self._item_dur_spin.setEnabled(False)
 
         self._update_wp_status(pl)
 
-    def _add_wp_item(self, path: str) -> None:
+    def _add_wp_item(self, path: str, duration_minutes: int = 0) -> None:
         name = Path(path).name
         icon = _load_icon(path)
         item = QListWidgetItem(name)
         item.setData(Qt.ItemDataRole.UserRole, path)
+        item.setData(Qt.ItemDataRole.UserRole + 1, duration_minutes)
         item.setToolTip(path)
         if icon:
             item.setIcon(icon)
@@ -365,13 +411,16 @@ class PlaylistTab(QWidget):
         paths = pl.get("wallpaper_paths", [])
         n = len(paths)
         missing = sum(1 for p in paths if not Path(p).exists())
-        if n == 0:
-            self._wp_status.setText("Empty — add wallpapers with the button or right-click in Library")
-        else:
+        empty = n == 0
+        self._wp_list.setVisible(not empty)
+        self._wp_empty_label.setVisible(empty)
+        if not empty:
             txt = f"{n} item{'s' if n != 1 else ''}"
             if missing:
                 txt += f"  ({missing} missing from disk)"
             self._wp_status.setText(txt)
+        else:
+            self._wp_status.setText("")
 
     def _show_editor(self, visible: bool) -> None:
         self._empty_label.setVisible(not visible)
@@ -435,16 +484,15 @@ class PlaylistTab(QWidget):
             self._core.SetPlaylistName(self._selected_id, self._name_edit.text())
         except Exception:
             return
-        # Update the label in the left list without a full reload.
-        for i in range(self._pl_list.count()):
-            it = self._pl_list.item(i)
-            if it and it.data(Qt.ItemDataRole.UserRole) == self._selected_id:
-                it.setText(self._name_edit.text())
-                break
-        # Keep local cache in sync.
+        # Keep local cache in sync first, then update list item text with badge.
         pl = self._get_playlist(self._selected_id)
         if pl:
             pl["name"] = self._name_edit.text()
+        for i in range(self._pl_list.count()):
+            it = self._pl_list.item(i)
+            if it and it.data(Qt.ItemDataRole.UserRole) == self._selected_id:
+                it.setText(self._pl_display_text(pl) if pl else self._name_edit.text())
+                break
 
     def _on_shuffle_toggled(self, checked: bool) -> None:
         if not self._core or not self._selected_id:
@@ -456,6 +504,12 @@ class PlaylistTab(QWidget):
         pl = self._get_playlist(self._selected_id)
         if pl:
             pl["shuffle"] = checked
+            # Refresh the ⇌ indicator in the left panel.
+            for i in range(self._pl_list.count()):
+                it = self._pl_list.item(i)
+                if it and it.data(Qt.ItemDataRole.UserRole) == self._selected_id:
+                    it.setText(self._pl_display_text(pl))
+                    break
 
     def _on_interval_changed(self, value: int) -> None:
         if not self._core or not self._selected_id:
@@ -502,6 +556,72 @@ class PlaylistTab(QWidget):
     # Wallpaper list actions
     # ------------------------------------------------------------------
 
+    def _on_wp_row_changed(self, row: int) -> None:
+        """Update the duration spinbox when the selected wallpaper changes."""
+        if row < 0:
+            self._item_dur_spin.blockSignals(True)
+            self._item_dur_spin.setValue(0)
+            self._item_dur_spin.blockSignals(False)
+            self._item_dur_spin.setEnabled(False)
+            return
+        item = self._wp_list.item(row)
+        dur = item.data(Qt.ItemDataRole.UserRole + 1) if item else 0
+        self._item_dur_spin.blockSignals(True)
+        self._item_dur_spin.setValue(dur or 0)
+        self._item_dur_spin.blockSignals(False)
+        self._item_dur_spin.setEnabled(True)
+
+    def _on_item_duration_changed(self, value: int) -> None:
+        """Push per-item duration change to the service."""
+        if not self._core or not self._selected_id:
+            return
+        row = self._wp_list.currentRow()
+        if row < 0:
+            return
+        item = self._wp_list.item(row)
+        if item:
+            item.setData(Qt.ItemDataRole.UserRole + 1, value)
+        try:
+            self._core.SetItemDuration(self._selected_id, row, value)
+        except Exception:
+            pass
+        # Update local cache
+        pl = self._get_playlist(self._selected_id)
+        if pl:
+            durs = pl.setdefault("item_durations", [])
+            while len(durs) <= row:
+                durs.append(0)
+            durs[row] = value
+
+    def _on_wp_reordered(
+        self,
+        _src_parent: QModelIndex,
+        src_first: int,
+        src_last: int,
+        _dst_parent: QModelIndex,
+        dst_row: int,
+    ) -> None:
+        """Called after internal drag-drop; persist new order to service."""
+        if src_first != src_last:
+            return  # multi-item moves not supported
+        from_index = src_first
+        to_index = dst_row - 1 if dst_row > src_first else dst_row
+        if from_index == to_index or not self._core or not self._selected_id:
+            return
+        try:
+            self._core.ReorderPlaylist(self._selected_id, from_index, to_index)
+        except Exception:
+            return
+        pl = self._get_playlist(self._selected_id)
+        if pl:
+            paths = pl.get("wallpaper_paths", [])
+            moved = paths.pop(from_index)
+            paths.insert(to_index, moved)
+            durs = pl.get("item_durations", [])
+            if durs and from_index < len(durs):
+                d = durs.pop(from_index)
+                durs.insert(min(to_index, len(durs)), d)
+
     def _add_wallpaper(self) -> None:
         if not self._core or not self._selected_id:
             return
@@ -516,11 +636,13 @@ class PlaylistTab(QWidget):
             self._status_label.setText(f"AddToPlaylist error: {exc}")
             return
         if ok:
-            self._add_wp_item(path)
+            self._add_wp_item(path, 0)
             pl = self._get_playlist(self._selected_id)
             if pl:
                 pl.setdefault("wallpaper_paths", []).append(path)
+                pl.setdefault("item_durations", []).append(0)
                 self._update_wp_status(pl)
+                self._refresh_pl_count_badge()
 
     def _remove_wallpaper(self) -> None:
         if not self._core or not self._selected_id:
@@ -537,7 +659,11 @@ class PlaylistTab(QWidget):
             pl = self._get_playlist(self._selected_id)
             if pl and 0 <= row < len(pl.get("wallpaper_paths", [])):
                 pl["wallpaper_paths"].pop(row)
+                durs = pl.get("item_durations", [])
+                if row < len(durs):
+                    durs.pop(row)
                 self._update_wp_status(pl)
+                self._refresh_pl_count_badge()
 
     def _move_up(self) -> None:
         row = self._wp_list.currentRow()
@@ -568,6 +694,19 @@ class PlaylistTab(QWidget):
                 moved = paths.pop(from_row)
                 paths.insert(to_row, moved)
 
+    def _refresh_pl_count_badge(self) -> None:
+        """Update the count badge for the currently selected playlist."""
+        if not self._selected_id:
+            return
+        pl = self._get_playlist(self._selected_id)
+        if not pl:
+            return
+        for i in range(self._pl_list.count()):
+            it = self._pl_list.item(i)
+            if it and it.data(Qt.ItemDataRole.UserRole) == self._selected_id:
+                it.setText(self._pl_display_text(pl))
+                break
+
     # ------------------------------------------------------------------
     # Public API (called from MainWindow)
     # ------------------------------------------------------------------
@@ -585,11 +724,13 @@ class PlaylistTab(QWidget):
         except Exception:
             return
         if ok and playlist_id == self._selected_id:
-            self._add_wp_item(info.path)
+            self._add_wp_item(info.path, 0)
             pl = self._get_playlist(playlist_id)
             if pl:
                 pl.setdefault("wallpaper_paths", []).append(info.path)
+                pl.setdefault("item_durations", []).append(0)
                 self._update_wp_status(pl)
+                self._refresh_pl_count_badge()
 
     def add_item(self, info: WallpaperInfo) -> None:
         """Add *info* to the currently selected playlist (or first playlist).

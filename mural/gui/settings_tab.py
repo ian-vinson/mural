@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -55,6 +56,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+_POWER_PRESETS = {
+    "Gaming":  {"fps_limit": 0,  "mute_audio": False, "fullscreen_pause": True, "quality_profile": "High"},
+    "Work":    {"fps_limit": 30, "mute_audio": False, "fullscreen_pause": True, "quality_profile": "Medium"},
+    "Battery": {"fps_limit": 15, "mute_audio": True,  "fullscreen_pause": True, "quality_profile": "Low"},
+}
 
 _CONFIG_DIR = Path("~/.config/mural").expanduser()
 _SETTINGS_JSON = _CONFIG_DIR / "settings.json"
@@ -78,6 +85,7 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "playlist_interval_minutes": 0,   # 0 = disabled
     "monitor_assignments": {},
     "pywal_on_change": False,
+    "pause_app_list": [],
 }
 
 
@@ -170,6 +178,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_performance_section())
         layout.addWidget(self._build_playlist_section())
         layout.addWidget(self._build_linux_integration_section())
+        layout.addWidget(self._build_app_rules_section())
         layout.addWidget(self._build_autostart_section())
         layout.addStretch()
 
@@ -360,8 +369,14 @@ class SettingsTab(QWidget):
         self._mute_chk = QCheckBox("Mute wallpaper audio")
         form.addRow("Audio:", self._mute_chk)
 
-        self._battery_chk = QCheckBox("Pause wallpaper when on battery")
-        form.addRow("Battery:", self._battery_chk)
+        battery_row = QHBoxLayout()
+        self._battery_chk = QCheckBox("Pause when on battery")
+        battery_row.addWidget(self._battery_chk)
+        self._battery_status_label = QLabel()
+        self._battery_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        battery_row.addWidget(self._battery_status_label)
+        battery_row.addStretch()
+        form.addRow("Battery:", battery_row)
 
         self._fullscreen_chk = QCheckBox(
             "Pause wallpaper when a fullscreen window is detected"
@@ -378,16 +393,33 @@ class SettingsTab(QWidget):
         box = QGroupBox("Performance")
         layout = QVBoxLayout(box)
 
+        # Power-profile preset buttons
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("Presets:"))
+        _btn_style = (
+            "QPushButton { border: 1px solid #555; border-radius: 3px; "
+            "padding: 2px 10px; font-size: 11px; background: transparent; } "
+            "QPushButton:hover { border-color: #888; background: #2a2a2a; }"
+        )
+        for label, preset in _POWER_PRESETS.items():
+            btn = QPushButton(label)
+            btn.setFixedHeight(24)
+            btn.setStyleSheet(_btn_style)
+            btn.clicked.connect(lambda _checked=False, p=preset: self._apply_preset(p))
+            preset_row.addWidget(btn)
+        preset_row.addStretch()
+        layout.addLayout(preset_row)
+
         self._quality_combo = QComboBox()
         for name in _QUALITY_PROFILES:
             self._quality_combo.addItem(name)
         self._quality_combo.currentTextChanged.connect(self._on_quality_changed)
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Quality profile:"))
-        row.addWidget(self._quality_combo)
-        row.addStretch()
-        layout.addLayout(row)
+        quality_row = QHBoxLayout()
+        quality_row.addWidget(QLabel("Quality profile:"))
+        quality_row.addWidget(self._quality_combo)
+        quality_row.addStretch()
+        layout.addLayout(quality_row)
 
         self._quality_note = QLabel()
         self._quality_note.setStyleSheet("color: #888; font-size: 11px;")
@@ -396,6 +428,16 @@ class SettingsTab(QWidget):
 
         self._on_quality_changed(self._quality_combo.currentText())
         return box
+
+    def _apply_preset(self, preset: dict) -> None:
+        """Populate settings fields from a power-profile preset dict."""
+        idx = self._quality_combo.findText(preset["quality_profile"])
+        if idx >= 0:
+            self._quality_combo.setCurrentIndex(idx)  # triggers _on_quality_changed
+        # Override fps with the preset's actual value (profile fps ≠ preset fps for Gaming)
+        self._fps_spin.setValue(preset["fps_limit"])
+        self._mute_chk.setChecked(preset["mute_audio"])
+        self._fullscreen_chk.setChecked(preset["fullscreen_pause"])
 
     def _on_quality_changed(self, name: str) -> None:
         profile = _QUALITY_PROFILES.get(name, {})
@@ -502,6 +544,72 @@ class SettingsTab(QWidget):
         return box
 
     # ------------------------------------------------------------------
+    # App Rules section
+    # ------------------------------------------------------------------
+
+    def _build_app_rules_section(self) -> QGroupBox:
+        box = QGroupBox("App Rules")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
+
+        self._app_list_edit = QPlainTextEdit()
+        self._app_list_edit.setPlaceholderText(
+            "one process name per line, e.g.\nsteam\nobs\nblender"
+        )
+        self._app_list_edit.setFixedHeight(72)
+        form.addRow("Pause when these\napps are running:", self._app_list_edit)
+
+        note = QLabel("Process names are matched case-insensitively. "
+                       "Checked every 10 seconds.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #888; font-size: 11px;")
+        form.addRow("", note)
+
+        self._app_rule_status_label = QLabel()
+        self._app_rule_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        form.addRow("Status:", self._app_rule_status_label)
+
+        return box
+
+    def _refresh_battery_status(self) -> None:
+        if not self._core:
+            self._battery_status_label.setText("")
+            return
+        try:
+            status = self._core.GetPowerStatus()
+        except Exception:
+            self._battery_status_label.setText("")
+            return
+        if status == "battery":
+            self._battery_status_label.setText("On battery")
+            self._battery_status_label.setStyleSheet("font-size: 11px; color: #FFA000;")
+        elif status == "ac":
+            self._battery_status_label.setText("On AC power")
+            self._battery_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        else:
+            self._battery_status_label.setText("Unknown power source")
+            self._battery_status_label.setStyleSheet("font-size: 11px; color: #888;")
+
+    def _refresh_app_rule_status(self) -> None:
+        if not self._core:
+            self._app_rule_status_label.setText("")
+            return
+        try:
+            status = self._core.GetAppRuleStatus()
+        except Exception:
+            self._app_rule_status_label.setText("")
+            return
+        if status.startswith("paused:"):
+            app_name = status.split(":", 1)[1]
+            self._app_rule_status_label.setText(f"Paused — {app_name} is running")
+            self._app_rule_status_label.setStyleSheet("font-size: 11px; color: #FFA000;")
+        else:
+            self._app_rule_status_label.setText("Running")
+            self._app_rule_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+
+    # ------------------------------------------------------------------
     # Autostart section
     # ------------------------------------------------------------------
 
@@ -583,14 +691,24 @@ class SettingsTab(QWidget):
         self._autostart_chk.setChecked(s.get("autostart", True))
         self._playlist_spin.setValue(s.get("playlist_interval_minutes", 0))
         self._pywal_chk.setChecked(s.get("pywal_on_change", False))
+        self._app_list_edit.setPlainText(
+            "\n".join(s.get("pause_app_list", []))
+        )
 
         profile = s.get("quality_profile", "Medium")
         idx = self._quality_combo.findText(profile)
         if idx >= 0:
             self._quality_combo.setCurrentIndex(idx)
 
+        self._refresh_battery_status()
+        self._refresh_app_rule_status()
+
     def _collect_settings(self) -> dict[str, Any]:
         """Read all widget values into a settings dict."""
+        raw_app_text = self._app_list_edit.toPlainText()
+        pause_app_list = [
+            line.strip() for line in raw_app_text.splitlines() if line.strip()
+        ]
         return {
             "fps_limit": self._fps_spin.value(),
             "mute_audio": self._mute_chk.isChecked(),
@@ -601,6 +719,7 @@ class SettingsTab(QWidget):
             "playlist_interval_minutes": self._playlist_spin.value(),
             "monitor_assignments": self._collect_monitor_assignments(),
             "pywal_on_change": self._pywal_chk.isChecked(),
+            "pause_app_list": pause_app_list,
         }
 
     def _save(self) -> None:
@@ -629,6 +748,8 @@ class SettingsTab(QWidget):
 
         self._refresh_service_status()
         self._refresh_playlist_status()
+        self._refresh_battery_status()
+        self._refresh_app_rule_status()
 
         if errors:
             self._status_label.setText("Saved with warnings: " + "; ".join(errors))
@@ -657,3 +778,5 @@ class SettingsTab(QWidget):
         self._refresh_monitors()
         self._refresh_service_status()
         self._refresh_playlist_status()
+        self._refresh_battery_status()
+        self._refresh_app_rule_status()
