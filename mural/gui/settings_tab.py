@@ -36,6 +36,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import json
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -198,13 +200,14 @@ class SettingsTab(QWidget):
         box = QGroupBox("Monitors")
         layout = QVBoxLayout(box)
 
-        self._monitor_table = QTableWidget(0, 3)
-        self._monitor_table.setHorizontalHeaderLabels(["Output", "Current Wallpaper", "Enabled"])
+        self._monitor_table = QTableWidget(0, 4)
+        self._monitor_table.setHorizontalHeaderLabels(["Output", "Current Wallpaper", "Enabled", "Playlist"])
         self._monitor_table.horizontalHeader().setStretchLastSection(False)
-        self._monitor_table.horizontalHeader().setMinimumSectionSize(80)
+        self._monitor_table.horizontalHeader().setMinimumSectionSize(70)
         self._monitor_table.setColumnWidth(0, 110)
-        self._monitor_table.setColumnWidth(1, 340)
+        self._monitor_table.setColumnWidth(1, 280)
         self._monitor_table.setColumnWidth(2, 70)
+        self._monitor_table.setColumnWidth(3, 150)
         self._monitor_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._monitor_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self._monitor_table.setAlternatingRowColors(True)
@@ -223,18 +226,29 @@ class SettingsTab(QWidget):
         self._monitor_table.setRowCount(0)
 
         monitors: list[str] = []
+        playlists: list[dict] = []
         if self._core:
             try:
                 monitors = list(self._core.GetMonitors())
             except Exception:
                 pass
+            try:
+                playlists = json.loads(self._core.GetPlaylists())
+            except Exception:
+                pass
+
+        # Build monitor → playlist name map
+        mon_to_playlist: dict[str, str] = {}
+        for pl in playlists:
+            for mon in pl.get("monitor_assignments", []):
+                mon_to_playlist[mon] = pl.get("id", "")
 
         if not monitors:
             self._monitor_table.setRowCount(1)
             placeholder = QTableWidgetItem("No monitors detected — start Core Service first")
             placeholder.setForeground(Qt.GlobalColor.darkGray)
             self._monitor_table.setItem(0, 0, placeholder)
-            self._monitor_table.setSpan(0, 0, 1, 3)
+            self._monitor_table.setSpan(0, 0, 1, 4)
             return
 
         assignments: dict = self._settings.get("monitor_assignments", {})
@@ -245,7 +259,7 @@ class SettingsTab(QWidget):
             # Output name
             self._monitor_table.setItem(row, 0, QTableWidgetItem(name))
 
-            # Current wallpaper (read from Core Service)
+            # Current wallpaper
             wallpaper = ""
             if self._core:
                 try:
@@ -267,6 +281,40 @@ class SettingsTab(QWidget):
             chk_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             chk_layout.setContentsMargins(0, 0, 0, 0)
             self._monitor_table.setCellWidget(row, 2, chk_widget)
+
+            # Playlist dropdown
+            combo = QComboBox()
+            combo.addItem("— None —", "")
+            for pl in playlists:
+                combo.addItem(pl.get("name", "?"), pl.get("id", ""))
+            current_pl_id = mon_to_playlist.get(name, "")
+            for idx in range(combo.count()):
+                if combo.itemData(idx) == current_pl_id:
+                    combo.setCurrentIndex(idx)
+                    break
+            combo.setProperty("monitorName", name)
+            combo.currentIndexChanged.connect(
+                lambda _idx, m=name, cb=combo: self._on_monitor_playlist_changed(m, cb)
+            )
+            self._monitor_table.setCellWidget(row, 3, combo)
+
+    def _on_monitor_playlist_changed(self, monitor: str, combo: QComboBox) -> None:
+        """Called when the user changes a monitor's playlist dropdown."""
+        if not self._core:
+            return
+        playlist_id: str = combo.currentData() or ""
+        try:
+            if playlist_id:
+                self._core.AssignPlaylistToMonitor(playlist_id, monitor)
+            else:
+                # "None" selected — unassign from whichever playlist owns it.
+                playlists = json.loads(self._core.GetPlaylists())
+                for pl in playlists:
+                    if monitor in pl.get("monitor_assignments", []):
+                        self._core.UnassignPlaylistFromMonitor(pl["id"], monitor)
+                        break
+        except Exception:
+            pass
 
     def _collect_monitor_assignments(self) -> dict[str, dict]:
         """Read enabled state from the monitor table into a dict."""
@@ -401,14 +449,24 @@ class SettingsTab(QWidget):
             self._playlist_status_label.setText("Core Service not connected")
             return
         try:
-            status = self._core.GetPlaylistStatus()
+            data = json.loads(self._core.GetPlaylistStatus())
         except Exception:
             self._playlist_status_label.setText("")
             return
-        if status.startswith("active:"):
-            mins = status[len("active:"):-len("min")]
-            self._playlist_status_label.setText(f"Auto-rotating every {mins} minutes")
+        running = data.get("timer_running", False)
+        global_interval = data.get("global_interval_minutes", 0)
+        playlists = data.get("playlists", [])
+        active = [p for p in playlists if p.get("monitors")]
+        if running and active:
+            self._playlist_status_label.setText(
+                f"Auto-rotating · {len(active)} playlist(s) active · global interval: {global_interval} min"
+            )
             self._playlist_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        elif global_interval > 0:
+            self._playlist_status_label.setText(
+                f"Timer active (every {global_interval} min) · no playlists assigned to monitors"
+            )
+            self._playlist_status_label.setStyleSheet("font-size: 11px; color: #FFA000;")
         else:
             self._playlist_status_label.setText("Auto-rotate disabled")
             self._playlist_status_label.setStyleSheet("font-size: 11px; color: #888;")

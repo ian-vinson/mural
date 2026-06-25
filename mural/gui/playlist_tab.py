@@ -4,44 +4,50 @@
 # Copyright (C) 2024  Mural Contributors
 # GPL v3 — see LICENSE
 
-"""Playlist tab — ordered wallpaper rotation with drag-and-drop reordering.
+"""Playlist editor tab.
 
-Users add wallpapers via right-click → Add to Playlist in the Library tab.
-Drag rows to reorder.  Toggle Shuffle to randomise within the list.
-When the playlist is empty the auto-rotate timer picks randomly from the
-full library instead.
+Layout:
+  Left  — named playlist list + Create / Delete buttons
+  Right — editor for the selected playlist:
+            Name, Shuffle, Interval, Monitor assignments, Wallpaper list
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
-from PySide6.QtCore import QByteArray, QSize, Qt
-from PySide6.QtGui import QFont, QIcon, QImageReader, QPixmap
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QIcon, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from mural.gui.wallpaper_card import WallpaperInfo
 
-_THUMB_W = 64
-_THUMB_H = 48
-
+_THUMB_W = 56
+_THUMB_H = 42
 _THUMBNAIL_NAMES = ("preview.jpg", "preview.png", "preview.gif",
                     "preview.webp", "thumbnail.jpg", "thumbnail.png")
 
 
 def _load_icon(wallpaper_path: str) -> QIcon | None:
-    """Load a small thumbnail icon from a wallpaper directory."""
     p = Path(wallpaper_path)
     if not p.is_dir():
         return None
@@ -62,16 +68,19 @@ def _load_icon(wallpaper_path: str) -> QIcon | None:
 
 
 class PlaylistTab(QWidget):
-    """Playlist management panel.
+    """Full playlist editor.
 
     Args:
-        core_proxy: dasbus proxy for ``com.mural.Core``, or ``None``.
+        core_proxy: dasbus proxy for ``com.mural.Core``.  May be ``None``.
         parent: Optional Qt parent.
     """
 
     def __init__(self, core_proxy: Any | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._core = core_proxy
+        self._selected_id: str | None = None  # currently selected playlist id
+        self._playlists: list[dict] = []       # cache from last GetPlaylists()
+        self._monitor_names: list[str] = []    # connected monitor names
         self._build_ui()
         self._reload()
 
@@ -80,88 +89,262 @@ class PlaylistTab(QWidget):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(10)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
 
-        # Toolbar
-        toolbar = QHBoxLayout()
-        self._shuffle_chk = QCheckBox("Shuffle")
-        self._shuffle_chk.setToolTip("Play items in random order instead of top-to-bottom")
-        self._shuffle_chk.toggled.connect(self._on_shuffle_toggled)
-        toolbar.addWidget(self._shuffle_chk)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(1)
+        splitter.setChildrenCollapsible(False)
+        root.addWidget(splitter)
 
-        toolbar.addStretch()
+        splitter.addWidget(self._build_left_panel())
+        splitter.addWidget(self._build_right_panel())
+        splitter.setSizes([220, 600])
 
-        remove_btn = QPushButton("Remove Selected")
-        remove_btn.setFixedHeight(28)
-        remove_btn.clicked.connect(self._remove_selected)
-        toolbar.addWidget(remove_btn)
+    # ------ Left panel: playlist list ------
 
-        clear_btn = QPushButton("Clear All")
-        clear_btn.setFixedHeight(28)
-        clear_btn.clicked.connect(self._clear_all)
-        toolbar.addWidget(clear_btn)
+    def _build_left_panel(self) -> QWidget:
+        w = QWidget()
+        w.setMinimumWidth(180)
+        w.setMaximumWidth(260)
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(8, 8, 4, 8)
+        layout.setSpacing(6)
 
-        layout.addLayout(toolbar)
+        header = QLabel("Playlists")
+        header.setStyleSheet("font-weight: bold; font-size: 13px; color: #e0e0e0;")
+        layout.addWidget(header)
 
-        # Status label
-        self._status_label = QLabel()
-        self._status_label.setStyleSheet("color: #888; font-size: 11px;")
-        layout.addWidget(self._status_label)
-
-        # List widget
-        self._list = QListWidget()
-        self._list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._list.setIconSize(QSize(_THUMB_W, _THUMB_H))
-        self._list.setSpacing(2)
-        self._list.setAlternatingRowColors(True)
-        self._list.setStyleSheet(
+        self._pl_list = QListWidget()
+        self._pl_list.setStyleSheet(
             "QListWidget { background: #141421; border: 1px solid #2a2a2a; }"
-            "QListWidget::item { color: #e0e0e0; padding: 4px 8px; height: 56px; }"
+            "QListWidget::item { color: #e0e0e0; padding: 6px 8px; }"
+            "QListWidget::item:selected { background: #2979FF; color: #fff; }"
+        )
+        self._pl_list.currentItemChanged.connect(self._on_playlist_selected)
+        layout.addWidget(self._pl_list, 1)
+
+        btn_row = QHBoxLayout()
+        new_btn = QPushButton("+ New")
+        new_btn.setFixedHeight(28)
+        new_btn.clicked.connect(self._create_playlist)
+        btn_row.addWidget(new_btn)
+
+        self._del_btn = QPushButton("Delete")
+        self._del_btn.setFixedHeight(28)
+        self._del_btn.setEnabled(False)
+        self._del_btn.clicked.connect(self._delete_playlist)
+        btn_row.addWidget(self._del_btn)
+
+        layout.addLayout(btn_row)
+        return w
+
+    # ------ Right panel: editor ------
+
+    def _build_right_panel(self) -> QWidget:
+        self._right_stack_widget = QWidget()
+        layout = QVBoxLayout(self._right_stack_widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(0)
+
+        # Empty-state hint shown when nothing is selected.
+        self._empty_label = QLabel("Select or create a playlist")
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setStyleSheet("color: #555; font-size: 13px;")
+        layout.addWidget(self._empty_label)
+
+        # Editor widget (hidden when nothing selected).
+        self._editor = QWidget()
+        self._editor.hide()
+        ed_layout = QVBoxLayout(self._editor)
+        ed_layout.setContentsMargins(0, 0, 0, 0)
+        ed_layout.setSpacing(12)
+
+        # Name
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Name:"))
+        self._name_edit = QLineEdit()
+        self._name_edit.setFixedHeight(28)
+        self._name_edit.editingFinished.connect(self._on_name_changed)
+        name_row.addWidget(self._name_edit)
+        ed_layout.addLayout(name_row)
+
+        # Options row: shuffle + interval
+        opts_row = QHBoxLayout()
+        self._shuffle_chk = QCheckBox("Shuffle")
+        self._shuffle_chk.toggled.connect(self._on_shuffle_toggled)
+        opts_row.addWidget(self._shuffle_chk)
+
+        opts_row.addSpacing(20)
+        opts_row.addWidget(QLabel("Interval:"))
+        self._interval_spin = QSpinBox()
+        self._interval_spin.setRange(0, 1440)
+        self._interval_spin.setSuffix(" min")
+        self._interval_spin.setFixedWidth(90)
+        self._interval_spin.setToolTip("0 = use the global setting in Settings → Playlist")
+        self._interval_spin.valueChanged.connect(self._on_interval_changed)
+        opts_row.addWidget(self._interval_spin)
+        opts_row.addWidget(QLabel("(0 = global)"))
+        opts_row.addStretch()
+        ed_layout.addLayout(opts_row)
+
+        # Monitor assignments
+        mon_box = QGroupBox("Assign to monitors")
+        self._mon_layout = QHBoxLayout(mon_box)
+        self._mon_layout.setContentsMargins(8, 4, 8, 4)
+        self._mon_checkboxes: dict[str, QCheckBox] = {}
+        ed_layout.addWidget(mon_box)
+
+        # Wallpaper list
+        wp_box = QGroupBox("Wallpapers")
+        wp_layout = QVBoxLayout(wp_box)
+        wp_layout.setContentsMargins(6, 6, 6, 6)
+        wp_layout.setSpacing(6)
+
+        self._wp_list = QListWidget()
+        self._wp_list.setIconSize(QSize(_THUMB_W, _THUMB_H))
+        self._wp_list.setSpacing(2)
+        self._wp_list.setAlternatingRowColors(True)
+        self._wp_list.setStyleSheet(
+            "QListWidget { background: #141421; border: 1px solid #2a2a2a; }"
+            "QListWidget::item { color: #e0e0e0; padding: 3px 6px; height: 50px; }"
             "QListWidget::item:selected { background: #2979FF; color: #fff; }"
             "QListWidget::item:alternate { background: #1A1A2E; }"
         )
-        self._list.model().rowsMoved.connect(self._on_rows_moved)
-        layout.addWidget(self._list, 1)
+        wp_layout.addWidget(self._wp_list, 1)
 
-        # Hint
-        hint = QLabel("Right-click any wallpaper in the Library tab to add it here.\n"
-                      "Drag rows to reorder.")
-        hint.setStyleSheet("color: #555; font-size: 11px;")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(hint)
+        wp_btn_row = QHBoxLayout()
+        add_wp_btn = QPushButton("+ Add Wallpaper")
+        add_wp_btn.clicked.connect(self._add_wallpaper)
+        wp_btn_row.addWidget(add_wp_btn)
+
+        up_btn = QPushButton("↑")
+        up_btn.setFixedWidth(32)
+        up_btn.clicked.connect(self._move_up)
+        wp_btn_row.addWidget(up_btn)
+
+        down_btn = QPushButton("↓")
+        down_btn.setFixedWidth(32)
+        down_btn.clicked.connect(self._move_down)
+        wp_btn_row.addWidget(down_btn)
+
+        wp_btn_row.addStretch()
+
+        remove_wp_btn = QPushButton("Remove")
+        remove_wp_btn.clicked.connect(self._remove_wallpaper)
+        wp_btn_row.addWidget(remove_wp_btn)
+        wp_layout.addLayout(wp_btn_row)
+
+        self._wp_status = QLabel()
+        self._wp_status.setStyleSheet("color: #888; font-size: 11px;")
+        wp_layout.addWidget(self._wp_status)
+
+        ed_layout.addWidget(wp_box, 1)
+        layout.addWidget(self._editor, 1)
+
+        return self._right_stack_widget
 
     # ------------------------------------------------------------------
-    # Data loading / saving
+    # Data loading
     # ------------------------------------------------------------------
 
     def _reload(self) -> None:
-        """Fetch the current playlist from the service and repopulate the list."""
-        items: list[str] = []
-        shuffle = False
+        """Refresh playlist list and monitor list from the service."""
+        self._playlists = []
         if self._core:
             try:
-                items = list(self._core.GetPlaylist())
-                shuffle = bool(self._core.GetPlaylistShuffle())
+                self._playlists = json.loads(self._core.GetPlaylists())
+            except Exception:
+                pass
+            try:
+                self._monitor_names = list(self._core.GetMonitors())
             except Exception:
                 pass
 
-        self._list.blockSignals(True)
-        self._list.clear()
-        for path in items:
-            self._add_list_item(path)
-        self._list.blockSignals(False)
+        self._rebuild_pl_list()
+        self._rebuild_monitor_checkboxes()
+
+        # Re-select previously selected playlist.
+        if self._selected_id:
+            for i in range(self._pl_list.count()):
+                item = self._pl_list.item(i)
+                if item and item.data(Qt.ItemDataRole.UserRole) == self._selected_id:
+                    self._pl_list.setCurrentItem(item)
+                    break
+
+    def _get_playlist(self, playlist_id: str) -> dict | None:
+        return next((p for p in self._playlists if p["id"] == playlist_id), None)
+
+    def _rebuild_pl_list(self) -> None:
+        prev_id = self._selected_id
+        self._pl_list.blockSignals(True)
+        self._pl_list.clear()
+        for pl in self._playlists:
+            item = QListWidgetItem(pl["name"])
+            item.setData(Qt.ItemDataRole.UserRole, pl["id"])
+            self._pl_list.addItem(item)
+        self._pl_list.blockSignals(False)
+
+        # Restore selection.
+        if prev_id:
+            for i in range(self._pl_list.count()):
+                it = self._pl_list.item(i)
+                if it and it.data(Qt.ItemDataRole.UserRole) == prev_id:
+                    self._pl_list.setCurrentItem(it)
+                    return
+        # Nothing selected.
+        self._selected_id = None
+        self._show_editor(False)
+
+    def _rebuild_monitor_checkboxes(self) -> None:
+        """Rebuild the monitor assignment checkboxes."""
+        for chk in self._mon_checkboxes.values():
+            self._mon_layout.removeWidget(chk)
+            chk.deleteLater()
+        self._mon_checkboxes.clear()
+
+        for mon in self._monitor_names:
+            chk = QCheckBox(mon)
+            chk.toggled.connect(lambda checked, m=mon: self._on_monitor_toggled(m, checked))
+            self._mon_layout.addWidget(chk)
+            self._mon_checkboxes[mon] = chk
+
+        if not self._monitor_names:
+            lbl = QLabel("No monitors detected")
+            lbl.setStyleSheet("color: #555;")
+            self._mon_layout.addWidget(lbl)
+
+        self._mon_layout.addStretch()
+
+    def _populate_editor(self, pl: dict) -> None:
+        """Fill the editor widgets from playlist dict *pl*."""
+        self._name_edit.blockSignals(True)
+        self._name_edit.setText(pl.get("name", ""))
+        self._name_edit.blockSignals(False)
 
         self._shuffle_chk.blockSignals(True)
-        self._shuffle_chk.setChecked(shuffle)
+        self._shuffle_chk.setChecked(bool(pl.get("shuffle", False)))
         self._shuffle_chk.blockSignals(False)
 
-        self._update_status(items)
+        self._interval_spin.blockSignals(True)
+        self._interval_spin.setValue(int(pl.get("interval_minutes", 0)))
+        self._interval_spin.blockSignals(False)
 
-    def _add_list_item(self, path: str) -> None:
+        # Monitor checkboxes
+        assigned = set(pl.get("monitor_assignments", []))
+        for mon, chk in self._mon_checkboxes.items():
+            chk.blockSignals(True)
+            chk.setChecked(mon in assigned)
+            chk.blockSignals(False)
+
+        # Wallpaper list
+        self._wp_list.clear()
+        for path in pl.get("wallpaper_paths", []):
+            self._add_wp_item(path)
+
+        self._update_wp_status(pl)
+
+    def _add_wp_item(self, path: str) -> None:
         name = Path(path).name
         icon = _load_icon(path)
         item = QListWidgetItem(name)
@@ -169,76 +352,237 @@ class PlaylistTab(QWidget):
         item.setToolTip(path)
         if icon:
             item.setIcon(icon)
-        self._list.addItem(item)
+        self._wp_list.addItem(item)
 
-    def _current_paths(self) -> list[str]:
-        return [
-            self._list.item(i).data(Qt.ItemDataRole.UserRole)
-            for i in range(self._list.count())
-        ]
-
-    def _push_to_service(self) -> None:
-        """Send the current list order to the Core Service."""
-        if self._core:
-            try:
-                self._core.SetPlaylist(self._current_paths())
-            except Exception:
-                pass
-        self._update_status(self._current_paths())
-
-    def _update_status(self, items: list[str]) -> None:
-        n = len(items)
+    def _update_wp_status(self, pl: dict) -> None:
+        paths = pl.get("wallpaper_paths", [])
+        n = len(paths)
+        missing = sum(1 for p in paths if not Path(p).exists())
         if n == 0:
-            self._status_label.setText(
-                "No playlist — auto-rotate will pick randomly from your library"
-            )
+            self._wp_status.setText("Empty — add wallpapers with the button or right-click in Library")
         else:
-            mode = "shuffle" if self._shuffle_chk.isChecked() else "ordered"
-            self._status_label.setText(f"{n} item{'s' if n != 1 else ''} · {mode}")
+            txt = f"{n} item{'s' if n != 1 else ''}"
+            if missing:
+                txt += f"  ({missing} missing from disk)"
+            self._wp_status.setText(txt)
+
+    def _show_editor(self, visible: bool) -> None:
+        self._empty_label.setVisible(not visible)
+        self._editor.setVisible(visible)
+        self._del_btn.setEnabled(visible)
+
+    # ------------------------------------------------------------------
+    # Left-panel actions
+    # ------------------------------------------------------------------
+
+    def _on_playlist_selected(self, current: QListWidgetItem | None, _prev) -> None:
+        if not current:
+            self._selected_id = None
+            self._show_editor(False)
+            return
+        playlist_id = current.data(Qt.ItemDataRole.UserRole)
+        self._selected_id = playlist_id
+        pl = self._get_playlist(playlist_id)
+        if pl:
+            self._show_editor(True)
+            self._populate_editor(pl)
+
+    def _create_playlist(self) -> None:
+        if not self._core:
+            return
+        try:
+            new_id = self._core.CreatePlaylist("New Playlist")
+        except Exception:
+            return
+        self._selected_id = new_id
+        self._reload()
+        # Select the new item and focus the name field.
+        for i in range(self._pl_list.count()):
+            it = self._pl_list.item(i)
+            if it and it.data(Qt.ItemDataRole.UserRole) == new_id:
+                self._pl_list.setCurrentItem(it)
+                break
+        self._name_edit.selectAll()
+        self._name_edit.setFocus()
+
+    def _delete_playlist(self) -> None:
+        if not self._core or not self._selected_id:
+            return
+        try:
+            self._core.DeletePlaylist(self._selected_id)
+        except Exception:
+            return
+        self._selected_id = None
+        self._reload()
+
+    # ------------------------------------------------------------------
+    # Editor change handlers (each pushes to service immediately)
+    # ------------------------------------------------------------------
+
+    def _on_name_changed(self) -> None:
+        if not self._core or not self._selected_id:
+            return
+        try:
+            self._core.SetPlaylistName(self._selected_id, self._name_edit.text())
+        except Exception:
+            return
+        # Update the label in the left list without a full reload.
+        for i in range(self._pl_list.count()):
+            it = self._pl_list.item(i)
+            if it and it.data(Qt.ItemDataRole.UserRole) == self._selected_id:
+                it.setText(self._name_edit.text())
+                break
+        # Keep local cache in sync.
+        pl = self._get_playlist(self._selected_id)
+        if pl:
+            pl["name"] = self._name_edit.text()
+
+    def _on_shuffle_toggled(self, checked: bool) -> None:
+        if not self._core or not self._selected_id:
+            return
+        try:
+            self._core.SetPlaylistShuffle(self._selected_id, checked)
+        except Exception:
+            return
+        pl = self._get_playlist(self._selected_id)
+        if pl:
+            pl["shuffle"] = checked
+
+    def _on_interval_changed(self, value: int) -> None:
+        if not self._core or not self._selected_id:
+            return
+        try:
+            self._core.SetPlaylistInterval(self._selected_id, value)
+        except Exception:
+            return
+        pl = self._get_playlist(self._selected_id)
+        if pl:
+            pl["interval_minutes"] = value
+
+    def _on_monitor_toggled(self, monitor: str, checked: bool) -> None:
+        if not self._core or not self._selected_id:
+            return
+        try:
+            if checked:
+                self._core.AssignPlaylistToMonitor(self._selected_id, monitor)
+                # Other playlists may have lost this monitor — refresh.
+                self._reload_playlists_only()
+            else:
+                self._core.UnassignPlaylistFromMonitor(self._selected_id, monitor)
+        except Exception:
+            return
+        pl = self._get_playlist(self._selected_id)
+        if pl:
+            mons = set(pl.get("monitor_assignments", []))
+            if checked:
+                mons.add(monitor)
+            else:
+                mons.discard(monitor)
+            pl["monitor_assignments"] = list(mons)
+
+    def _reload_playlists_only(self) -> None:
+        """Refresh _playlists cache without touching the UI."""
+        if not self._core:
+            return
+        try:
+            self._playlists = json.loads(self._core.GetPlaylists())
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Wallpaper list actions
+    # ------------------------------------------------------------------
+
+    def _add_wallpaper(self) -> None:
+        if not self._core or not self._selected_id:
+            return
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Wallpaper Directory", str(Path.home())
+        )
+        if not path:
+            return
+        try:
+            ok = self._core.AddToPlaylist(self._selected_id, path)
+        except Exception:
+            return
+        if ok:
+            self._add_wp_item(path)
+            pl = self._get_playlist(self._selected_id)
+            if pl:
+                pl.setdefault("wallpaper_paths", []).append(path)
+                self._update_wp_status(pl)
+
+    def _remove_wallpaper(self) -> None:
+        if not self._core or not self._selected_id:
+            return
+        row = self._wp_list.currentRow()
+        if row < 0:
+            return
+        try:
+            ok = self._core.RemoveFromPlaylist(self._selected_id, row)
+        except Exception:
+            return
+        if ok:
+            self._wp_list.takeItem(row)
+            pl = self._get_playlist(self._selected_id)
+            if pl and 0 <= row < len(pl.get("wallpaper_paths", [])):
+                pl["wallpaper_paths"].pop(row)
+                self._update_wp_status(pl)
+
+    def _move_up(self) -> None:
+        row = self._wp_list.currentRow()
+        if row <= 0:
+            return
+        self._reorder(row, row - 1)
+
+    def _move_down(self) -> None:
+        row = self._wp_list.currentRow()
+        if row < 0 or row >= self._wp_list.count() - 1:
+            return
+        self._reorder(row, row + 1)
+
+    def _reorder(self, from_row: int, to_row: int) -> None:
+        if not self._core or not self._selected_id:
+            return
+        try:
+            ok = self._core.ReorderPlaylist(self._selected_id, from_row, to_row)
+        except Exception:
+            return
+        if ok:
+            item = self._wp_list.takeItem(from_row)
+            self._wp_list.insertItem(to_row, item)
+            self._wp_list.setCurrentRow(to_row)
+            pl = self._get_playlist(self._selected_id)
+            if pl:
+                paths = pl.get("wallpaper_paths", [])
+                moved = paths.pop(from_row)
+                paths.insert(to_row, moved)
 
     # ------------------------------------------------------------------
     # Public API (called from MainWindow)
     # ------------------------------------------------------------------
 
     def add_item(self, info: WallpaperInfo) -> None:
-        """Add *info* to the playlist if it is not already present."""
-        path = info.path
-        existing = self._current_paths()
-        if path in existing:
+        """Add *info* to the currently selected playlist (or first playlist)."""
+        if not self._core:
             return
-        if self._core:
-            try:
-                self._core.AddToPlaylist(path)
-            except Exception:
-                pass
-        self._add_list_item(path)
-        self._update_status(self._current_paths())
+        target_id = self._selected_id
+        if not target_id and self._playlists:
+            target_id = self._playlists[0]["id"]
+        if not target_id:
+            return
+        try:
+            ok = self._core.AddToPlaylist(target_id, info.path)
+        except Exception:
+            return
+        if ok and target_id == self._selected_id:
+            self._add_wp_item(info.path)
+            pl = self._get_playlist(target_id)
+            if pl:
+                pl.setdefault("wallpaper_paths", []).append(info.path)
+                self._update_wp_status(pl)
 
     def set_core_proxy(self, proxy: Any) -> None:
         """Update the service proxy and refresh."""
         self._core = proxy
         self._reload()
-
-    # ------------------------------------------------------------------
-    # Slot handlers
-    # ------------------------------------------------------------------
-
-    def _on_shuffle_toggled(self, checked: bool) -> None:
-        if self._core:
-            try:
-                self._core.SetPlaylistShuffle(checked)
-            except Exception:
-                pass
-        self._update_status(self._current_paths())
-
-    def _on_rows_moved(self, *_args) -> None:
-        self._push_to_service()
-
-    def _remove_selected(self) -> None:
-        for item in self._list.selectedItems():
-            self._list.takeItem(self._list.row(item))
-        self._push_to_service()
-
-    def _clear_all(self) -> None:
-        self._list.clear()
-        self._push_to_service()
