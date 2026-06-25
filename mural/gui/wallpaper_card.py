@@ -151,6 +151,7 @@ class WallpaperCard(QWidget):
         self._thumbnail: QPixmap | None = None
         self._hovered = False
         self._selected = False
+        self._has_props = self._check_has_props()
 
         self.setFixedSize(_CARD_W, _CARD_H)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -217,6 +218,9 @@ class WallpaperCard(QWidget):
             self._draw_hover_overlay(painter)
 
         self._draw_type_badge(painter)
+
+        if self._has_props:
+            self._draw_props_indicator(painter)
 
         if self._selected:
             self._draw_selection_border(painter)
@@ -306,6 +310,16 @@ class WallpaperCard(QWidget):
         # Badge text
         p.setPen(Qt.GlobalColor.white)
         p.drawText(bx + pad_x, by + pad_y, text_w, fm.height(), 0, label)
+
+    def _draw_props_indicator(self, p: QPainter) -> None:
+        """Draw a ⚙ icon in the bottom-left corner for scene wallpapers with properties."""
+        font = QFont()
+        font.setPixelSize(13)
+        p.setFont(font)
+        # Semi-transparent dark backing so the icon is readable over any thumbnail.
+        p.fillRect(2, _THUMB_H - 20, 20, 18, QColor(0, 0, 0, 120))
+        p.setPen(QColor("#FFD54F"))
+        p.drawText(2, _THUMB_H - 20, 20, 18, Qt.AlignmentFlag.AlignCenter, "⚙")
 
     def _draw_selection_border(self, p: QPainter) -> None:
         """Draw a coloured border around the card when selected."""
@@ -397,3 +411,13 @@ class WallpaperCard(QWidget):
 
     def sizeHint(self) -> QSize:  # type: ignore[override]
         return QSize(_CARD_W, _CARD_H)
+
+    def _check_has_props(self) -> bool:
+        """Return True if this is a scene wallpaper with configurable properties."""
+        if self._info.type.lower() != "scene":
+            return False
+        try:
+            from mural.utils.properties import has_properties
+            return has_properties(self._info.path)
+        except Exception:
+            return False

@@ -46,6 +46,8 @@ from typing import Callable
 
 import psutil
 
+from mural.utils.properties import load_overrides
+
 logger = logging.getLogger(__name__)
 
 _LWE_PROCESS_NAME = "linux-wallpaperengine"
@@ -264,6 +266,10 @@ class BackendRunner:
 
         for assignment in assignments:
             cmd += ["--screen-root", assignment.monitor, "--bg", assignment.wallpaper]
+
+        for assignment in assignments:
+            for key, value in load_overrides(assignment.wallpaper).items():
+                cmd += ["--set-property", f"{key}={value}"]
 
         return cmd
 

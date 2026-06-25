@@ -56,19 +56,22 @@ from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer
 from PySide6.QtCore import Signal
-from PySide6.QtGui import QAction, QCursor, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -141,6 +144,9 @@ class _PreviewPanel(QWidget):
         self._current_palette: list[str] = []
         self._palette_gen: int = 0
         self._active_worker: _PaletteWorker | None = None
+        self._current_props: list = []
+        self._prop_widgets: list = []
+        self._props_expanded: bool = False
 
         self.setMinimumWidth(_PREVIEW_MIN_W)
         self.setMaximumWidth(_PREVIEW_MAX_W)
@@ -219,6 +225,10 @@ class _PreviewPanel(QWidget):
         meta_layout.addWidget(self._colors_row)
 
         layout.addWidget(meta_frame)
+
+        self._props_section = self._build_props_section()
+        layout.addWidget(self._props_section)
+
         layout.addStretch()
 
         # Separator
@@ -255,6 +265,51 @@ class _PreviewPanel(QWidget):
         self._open_btn.hide()
         self._open_btn.clicked.connect(self._on_open_folder)
         layout.addWidget(self._open_btn)
+
+    def _build_props_section(self) -> QWidget:
+        """Build and return the collapsible properties panel widget."""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+
+        self._props_toggle_btn = QPushButton("▶ Properties")
+        self._props_toggle_btn.setFlat(True)
+        self._props_toggle_btn.setStyleSheet(
+            "QPushButton { font-size: 12px; color: #aaa; text-align: left;"
+            " padding: 0; border: none; background: transparent; }"
+            "QPushButton:hover { color: #ddd; }"
+        )
+        self._props_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._props_toggle_btn.clicked.connect(self._toggle_properties)
+        v.addWidget(self._props_toggle_btn)
+
+        self._props_content = QWidget()
+        self._props_content_layout = QVBoxLayout(self._props_content)
+        self._props_content_layout.setContentsMargins(4, 4, 4, 4)
+        self._props_content_layout.setSpacing(6)
+
+        self._props_scroll = QScrollArea()
+        self._props_scroll.setWidget(self._props_content)
+        self._props_scroll.setWidgetResizable(True)
+        self._props_scroll.setMaximumHeight(160)
+        self._props_scroll.setFrameShape(QFrame.Shape.StyledPanel)
+        self._props_scroll.setStyleSheet(
+            "QScrollArea { background: #141420; border: 1px solid #2a2a2a;"
+            " border-radius: 4px; }"
+        )
+        self._props_scroll.hide()
+        v.addWidget(self._props_scroll)
+
+        self._props_reset_btn = QPushButton("↺ Reset to defaults")
+        self._props_reset_btn.setFixedHeight(24)
+        self._props_reset_btn.setStyleSheet("font-size: 11px;")
+        self._props_reset_btn.clicked.connect(self._on_props_reset)
+        self._props_reset_btn.hide()
+        v.addWidget(self._props_reset_btn)
+
+        w.hide()
+        return w
 
     # ------------------------------------------------------------------
     # Public API
@@ -307,6 +362,8 @@ class _PreviewPanel(QWidget):
         if info.thumbnail_path and Path(info.thumbnail_path).exists():
             self._start_palette_extraction(info.thumbnail_path)
 
+        self._load_properties(info)
+
     def refresh_monitors(self) -> None:
         """Re-query the Core Service for the current monitor list."""
         self._refresh_monitor_list()
@@ -337,6 +394,8 @@ class _PreviewPanel(QWidget):
         self._open_btn.hide()
         self._colors_row.hide()
         self._current_palette = []
+        self._props_section.hide()
+        self._current_props = []
 
     def _refresh_monitor_list(self) -> None:
         """Re-populate the monitor combo from the Core Service."""
@@ -361,6 +420,215 @@ class _PreviewPanel(QWidget):
         idx = self._monitor_combo.findText(current)
         if idx >= 0:
             self._monitor_combo.setCurrentIndex(idx)
+
+    # ------------------------------------------------------------------
+    # Properties panel
+    # ------------------------------------------------------------------
+
+    def _load_properties(self, info: WallpaperInfo) -> None:
+        """Parse properties from project.json and refresh the properties panel."""
+        from mural.utils.properties import parse_properties, load_overrides
+
+        if info.type.lower() != "scene":
+            self._props_section.hide()
+            self._current_props = []
+            return
+
+        proj = Path(info.path) / "project.json"
+        if not proj.exists():
+            self._props_section.hide()
+            self._current_props = []
+            return
+
+        props = parse_properties(str(proj))
+        if not props:
+            self._props_section.hide()
+            self._current_props = []
+            return
+
+        self._current_props = props
+        overrides = load_overrides(info.path)
+        self._rebuild_prop_widgets(overrides)
+
+        arrow = "▼" if self._props_expanded else "▶"
+        self._props_toggle_btn.setText(f"{arrow} Properties ({len(props)})")
+        self._props_section.show()
+
+    def _rebuild_prop_widgets(self, overrides: dict) -> None:
+        """Clear and repopulate the scroll area with property widgets."""
+        while self._props_content_layout.count():
+            item = self._props_content_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+        self._prop_widgets = []
+
+        for prop in self._current_props:
+            current_val = overrides.get(prop.key, prop.value)
+            widget = self._build_prop_widget(prop, current_val)
+            self._props_content_layout.addWidget(widget)
+            self._prop_widgets.append((prop, widget))
+
+    def _build_prop_widget(self, prop, current_value: str) -> QWidget:
+        """Return a widget appropriate for *prop*'s type."""
+        if prop.type == "bool":
+            chk = QCheckBox(prop.label)
+            chk.setStyleSheet("font-size: 12px; color: #ccc;")
+            chk.setChecked(current_value not in ("0", "false", ""))
+            chk.toggled.connect(
+                lambda checked, p=prop: self._on_prop_changed(p, "1" if checked else "0")
+            )
+            return chk
+
+        if prop.type == "slider":
+            container = QWidget()
+            vbox = QVBoxLayout(container)
+            vbox.setContentsMargins(0, 0, 0, 2)
+            vbox.setSpacing(2)
+
+            lbl_row = QHBoxLayout()
+            lbl = QLabel(prop.label)
+            lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+            val_lbl = QLabel()
+            val_lbl.setStyleSheet("font-size: 11px; color: #aaa;")
+            val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            lbl_row.addWidget(lbl)
+            lbl_row.addWidget(val_lbl)
+            vbox.addLayout(lbl_row)
+
+            step = max(prop.step, 1e-6)
+            rng = max(1, round((prop.max_val - prop.min_val) / step))
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, rng)
+            try:
+                curr_f = float(current_value)
+            except (ValueError, TypeError):
+                curr_f = prop.min_val
+            curr_step = max(0, min(rng, round((curr_f - prop.min_val) / step)))
+            slider.setValue(curr_step)
+            val_lbl.setText(f"{curr_f:.2f}")
+
+            def _on_slide(v_int, p=prop, lbl=val_lbl):
+                actual = p.min_val + v_int * max(p.step, 1e-6)
+                lbl.setText(f"{actual:.2f}")
+                self._on_prop_changed(p, f"{actual:.4f}")
+
+            slider.valueChanged.connect(_on_slide)
+            vbox.addWidget(slider)
+            return container
+
+        if prop.type == "color":
+            container = QWidget()
+            h = QHBoxLayout(container)
+            h.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(prop.label + ":")
+            lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+            h.addWidget(lbl)
+            btn = QPushButton()
+            btn.setFixedSize(56, 22)
+            btn.setStyleSheet(
+                f"background-color: {current_value};"
+                "border: 1px solid #555; border-radius: 3px;"
+            )
+            color_ref = [current_value]
+
+            def _on_color(_c=False, p=prop, b=btn, ref=color_ref):
+                from PySide6.QtWidgets import QColorDialog
+                dlg = QColorDialog(QColor(ref[0]), self)
+                if dlg.exec():
+                    hex_c = dlg.currentColor().name()
+                    ref[0] = hex_c
+                    b.setStyleSheet(
+                        f"background-color: {hex_c};"
+                        "border: 1px solid #555; border-radius: 3px;"
+                    )
+                    self._on_prop_changed(p, hex_c)
+
+            btn.clicked.connect(_on_color)
+            h.addWidget(btn)
+            h.addStretch()
+            return container
+
+        if prop.type == "combo":
+            container = QWidget()
+            h = QHBoxLayout(container)
+            h.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(prop.label + ":")
+            lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+            h.addWidget(lbl)
+            combo = QComboBox()
+            combo.setStyleSheet("font-size: 12px;")
+            for opt in prop.options:
+                combo.addItem(opt)
+            try:
+                idx = int(current_value)
+            except (ValueError, TypeError):
+                idx = 0
+            if 0 <= idx < combo.count():
+                combo.setCurrentIndex(idx)
+            combo.currentIndexChanged.connect(
+                lambda i, p=prop: self._on_prop_changed(p, str(i))
+            )
+            h.addWidget(combo, 1)
+            return container
+
+        # text (fallback)
+        container = QWidget()
+        h = QHBoxLayout(container)
+        h.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(prop.label + ":")
+        lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+        h.addWidget(lbl)
+        edit = QLineEdit(current_value)
+        edit.setStyleSheet("font-size: 12px;")
+        edit.setFixedHeight(24)
+        edit.editingFinished.connect(
+            lambda p=prop, e=edit: self._on_prop_changed(p, e.text())
+        )
+        h.addWidget(edit, 1)
+        return container
+
+    def _on_prop_changed(self, prop, value: str) -> None:
+        """Persist the override and restart lwe if this wallpaper is currently active."""
+        if not self._current_info:
+            return
+        from mural.utils.properties import load_overrides, save_overrides
+        overrides = load_overrides(self._current_info.path)
+        overrides[prop.key] = value
+        save_overrides(self._current_info.path, overrides)
+        self._reapply_current()
+
+    def _on_props_reset(self) -> None:
+        """Clear all overrides for the current wallpaper and restart lwe."""
+        if not self._current_info:
+            return
+        from mural.utils.properties import save_overrides
+        save_overrides(self._current_info.path, {})
+        self._rebuild_prop_widgets({})
+        self._reapply_current()
+
+    def _toggle_properties(self) -> None:
+        self._props_expanded = not self._props_expanded
+        self._props_scroll.setVisible(self._props_expanded)
+        self._props_reset_btn.setVisible(self._props_expanded)
+        arrow = "▼" if self._props_expanded else "▶"
+        n = len(self._current_props)
+        self._props_toggle_btn.setText(f"{arrow} Properties ({n})")
+
+    def _reapply_current(self) -> None:
+        """Call SetWallpaper for every monitor that is currently showing this wallpaper."""
+        if not self._core or not self._current_info:
+            return
+        path = self._current_info.path
+        try:
+            monitors = list(self._core.GetMonitors())
+        except Exception:
+            return
+        for monitor in monitors:
+            try:
+                if self._core.GetCurrentWallpaper(monitor) == path:
+                    self._core.SetWallpaper(monitor, path)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Palette helpers
