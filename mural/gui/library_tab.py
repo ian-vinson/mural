@@ -169,14 +169,28 @@ def _classify_directory(path: Path) -> WallpaperInfo | None:
     # Scene wallpaper — linux-wallpaperengine format
     project_json = path / "project.json"
     if project_json.exists():
-        name, wtype, resolution = _parse_project_json(project_json)
-        thumb = _find_directory_thumbnail(path)
+        meta = _parse_project_json(project_json)
+        # Prefer the preview filename from project.json, fall back to known names.
+        thumb: str | None = None
+        if meta["preview"]:
+            candidate = path / meta["preview"]
+            # Only accept the project.json preview if it is an image file;
+            # some wallpapers set the preview to a video file which QPixmap
+            # cannot load, and we don't want that to block the image fallback.
+            if candidate.exists() and candidate.suffix.lower() in _IMAGE_EXTS:
+                thumb = str(candidate)
+        if thumb is None:
+            thumb = _find_directory_thumbnail(path)
         return WallpaperInfo(
-            name=name or path.name,
+            name=meta["name"] or path.name,
             path=str(path),
-            type=wtype,
+            type=meta["type"],
             thumbnail_path=thumb,
-            resolution=resolution,
+            resolution=meta["resolution"],
+            author=meta["author"],
+            tags=meta["tags"],
+            description=meta["description"],
+            file_size=_dir_size(path),
             source="local",
         )
 
@@ -189,29 +203,52 @@ def _classify_directory(path: Path) -> WallpaperInfo | None:
             path=str(path),
             type="web",
             thumbnail_path=thumb,
+            file_size=_dir_size(path),
             source="local",
         )
 
     return None
 
 
-def _parse_project_json(json_path: Path) -> tuple[str, str, str]:
-    """Extract name, type, and resolution from a Wallpaper Engine project.json.
+def _parse_project_json(json_path: Path) -> dict:
+    """Extract metadata from a Wallpaper Engine project.json.
 
-    Returns:
-        Tuple of (name, type, resolution) — all may be empty strings on failure.
+    Returns a dict with keys: name, type, resolution, author, tags,
+    description, preview.  All values default to safe empty values on error.
     """
+    empty: dict = {
+        "name": "", "type": "scene", "resolution": "",
+        "author": "", "tags": [], "description": "", "preview": "",
+    }
     try:
         data: dict = json.loads(json_path.read_text(encoding="utf-8", errors="replace"))
         name = data.get("title") or data.get("name") or ""
         raw_type = (data.get("type") or "scene").lower()
         wtype = raw_type if raw_type in ("scene", "web", "video", "image") else "scene"
+
         resolution = ""
         if "width" in data and "height" in data:
             resolution = f"{data['width']}x{data['height']}"
-        return name, wtype, resolution
+
+        raw_tags = data.get("tags") or []
+        if isinstance(raw_tags, list):
+            tags = [str(t) for t in raw_tags if t]
+        elif isinstance(raw_tags, str):
+            tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+        else:
+            tags = []
+
+        return {
+            "name": name,
+            "type": wtype,
+            "resolution": resolution,
+            "author": data.get("author") or data.get("workshopid") or "",
+            "tags": tags,
+            "description": data.get("description") or "",
+            "preview": data.get("preview") or "",
+        }
     except Exception:
-        return "", "scene", ""
+        return empty
 
 
 def _find_directory_thumbnail(path: Path) -> str | None:
@@ -240,6 +277,18 @@ def _safe_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _dir_size(path: Path) -> int:
+    """Return total size of all files directly inside *path* (non-recursive), or 0."""
+    total = 0
+    try:
+        for entry in path.iterdir():
+            if entry.is_file():
+                total += _safe_size(entry)
+    except OSError:
+        pass
+    return total
 
 
 def _detect_steam_workshop_paths() -> list[Path]:
@@ -374,6 +423,8 @@ class LibraryTab(QWidget):
         self._visible_cards: list[WallpaperCard] = []
         self._selected_card: WallpaperCard | None = None
         self._active_filter = "all"
+        self._active_tags: set[str] = set()
+        self._tag_buttons: dict[str, QPushButton] = {}
         self._scan_worker: _LibraryScanWorker | None = None
         self._extra_dirs: list[Path] = []
 
@@ -390,6 +441,7 @@ class LibraryTab(QWidget):
         root.setSpacing(6)
 
         root.addLayout(self._build_toolbar())
+        root.addWidget(self._build_tag_row_widget())
 
         # Progress bar (hidden after scan completes)
         self._progress = QProgressBar()
@@ -450,6 +502,36 @@ class LibraryTab(QWidget):
 
         return toolbar
 
+    def _build_tag_row_widget(self) -> QWidget:
+        """Build the tag-chip filter row (hidden until the scan finds tags)."""
+        self._tag_row_widget = QWidget()
+        outer = QHBoxLayout(self._tag_row_widget)
+        outer.setContentsMargins(0, 2, 0, 0)
+        outer.setSpacing(6)
+
+        # Inner chip container — replaced wholesale by _rebuild_tag_row().
+        self._chips_widget = QWidget()
+        self._chips_layout = QHBoxLayout(self._chips_widget)
+        self._chips_layout.setContentsMargins(0, 0, 0, 0)
+        self._chips_layout.setSpacing(4)
+        outer.addWidget(self._chips_widget)
+
+        outer.addStretch()
+
+        self._clear_btn = QPushButton("✕ Clear filters")
+        self._clear_btn.setFlat(True)
+        self._clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clear_btn.setStyleSheet(
+            "QPushButton { color: #888; font-size: 11px; padding: 0 4px; }"
+            "QPushButton:hover { color: #ccc; }"
+        )
+        self._clear_btn.clicked.connect(self._clear_filters)
+        self._clear_btn.hide()
+        outer.addWidget(self._clear_btn)
+
+        self._tag_row_widget.hide()
+        return self._tag_row_widget
+
     # ------------------------------------------------------------------
     # Scanning
     # ------------------------------------------------------------------
@@ -472,6 +554,10 @@ class LibraryTab(QWidget):
         self._all_infos.clear()
         self._visible_cards.clear()
         self._selected_card = None
+        self._active_tags.clear()
+        self._tag_buttons.clear()
+        self._tag_row_widget.hide()
+        self._clear_btn.hide()
 
         self._progress.show()
         self._status_label.setText("Scanning…")
@@ -491,13 +577,105 @@ class LibraryTab(QWidget):
             self._add_card(info)
 
     def _on_scan_complete(self, total: int) -> None:
-        """Hide the progress bar and update the status label."""
+        """Hide the progress bar, rebuild tag chips, and update the status label."""
         self._progress.hide()
+        self._rebuild_tag_row()
         self._update_status()
 
     # ------------------------------------------------------------------
     # Filtering
     # ------------------------------------------------------------------
+
+    # Wallpaper Engine tags shown first when present in the library.
+    _PRIORITY_TAGS: tuple[str, ...] = (
+        "Anime", "Gaming", "Nature", "Abstract", "Cyberpunk",
+        "Relaxing", "Music", "Fantasy", "Dark", "Cute",
+    )
+
+    def _rebuild_tag_row(self) -> None:
+        """Repopulate the tag chip row from the current library."""
+        # Count how many wallpapers carry each tag.
+        counts: dict[str, int] = {}
+        for info in self._all_infos:
+            for tag in info.tags:
+                if tag:
+                    counts[tag] = counts.get(tag, 0) + 1
+
+        # Only show tags that appear on 2+ wallpapers.
+        eligible = {t: c for t, c in counts.items() if c >= 2}
+        if not eligible:
+            self._tag_row_widget.hide()
+            return
+
+        def _sort_key(tag: str) -> tuple[int, int, str]:
+            try:
+                pri = self._PRIORITY_TAGS.index(tag)
+            except ValueError:
+                pri = len(self._PRIORITY_TAGS)
+            return (pri, -eligible[tag], tag.lower())
+
+        chosen = sorted(eligible, key=_sort_key)[:8]
+
+        # Rebuild the chips widget from scratch.
+        self._tag_buttons = {}
+        while self._chips_layout.count():
+            item = self._chips_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        for tag in chosen:
+            btn = QPushButton(tag)
+            btn.setCheckable(True)
+            btn.setChecked(tag in self._active_tags)
+            btn.setFixedHeight(24)
+            btn.setStyleSheet(
+                "QPushButton {"
+                "  background:#2a2a2a; border:1px solid #444;"
+                "  border-radius:10px; color:#bbb; padding:0 8px;"
+                "  font-size:11px;"
+                "}"
+                "QPushButton:checked {"
+                "  background:#2979FF; border-color:#2979FF; color:#fff;"
+                "}"
+                "QPushButton:hover:!checked { border-color:#666; color:#eee; }"
+            )
+            btn.clicked.connect(lambda _chk, t=tag: self._toggle_tag(t))
+            self._chips_layout.addWidget(btn)
+            self._tag_buttons[tag] = btn
+
+        self._tag_row_widget.show()
+        self._update_clear_btn()
+
+    def _toggle_tag(self, tag: str) -> None:
+        """Toggle *tag* in the active-tag set and re-filter."""
+        if tag in self._active_tags:
+            self._active_tags.discard(tag)
+        else:
+            self._active_tags.add(tag)
+        # Sync button checked state in case the click already toggled it.
+        if tag in self._tag_buttons:
+            self._tag_buttons[tag].setChecked(tag in self._active_tags)
+        self._update_clear_btn()
+        self._apply_filter()
+
+    def _update_clear_btn(self) -> None:
+        """Show 'Clear filters' when any filter is active."""
+        active = (
+            self._active_filter != "all"
+            or bool(self._active_tags)
+            or bool(self._search.text().strip())
+        )
+        self._clear_btn.setVisible(active)
+
+    def _clear_filters(self) -> None:
+        """Reset type filter, tag filter, and search box to defaults."""
+        self._active_tags.clear()
+        for btn in self._tag_buttons.values():
+            btn.setChecked(False)
+        self._search.blockSignals(True)
+        self._search.clear()
+        self._search.blockSignals(False)
+        self._set_type_filter("all")  # calls _apply_filter internally
 
     def _set_type_filter(self, key: str) -> None:
         """Switch the active type filter and refresh the grid."""
@@ -508,7 +686,8 @@ class LibraryTab(QWidget):
         self._apply_filter()
 
     def _apply_filter(self) -> None:
-        """Re-populate the grid based on the current filter and search text."""
+        """Re-populate the grid based on all active filters."""
+        self._update_clear_btn()
         self._grid.clear_cards()
         self._visible_cards.clear()
         self._selected_card = None
@@ -520,9 +699,16 @@ class LibraryTab(QWidget):
         self._update_status()
 
     def _matches_filter(self, info: WallpaperInfo) -> bool:
-        """Return ``True`` if *info* passes both the type filter and search text."""
+        """Return ``True`` if *info* passes type, tag, and search filters."""
+        # Type filter
         if self._active_filter != "all" and info.type != self._active_filter:
             return False
+        # Tag filter — AND: wallpaper must carry every selected tag.
+        if self._active_tags:
+            card_tags = {t.lower() for t in info.tags}
+            if not all(t.lower() in card_tags for t in self._active_tags):
+                return False
+        # Search text
         query = self._search.text().strip().lower()
         if query and query not in info.name.lower():
             return False

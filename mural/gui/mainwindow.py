@@ -154,8 +154,10 @@ class _PreviewPanel(QWidget):
         self._res_label   = _meta_row("Resolution:", "")
         self._size_label  = _meta_row("Size:", "")
         self._tags_label  = _meta_row("Tags:", "")
+        self._desc_label  = _meta_row("Description:", "")
         for lbl in (self._type_label, self._author_label,
-                    self._res_label, self._size_label, self._tags_label):
+                    self._res_label, self._size_label, self._tags_label,
+                    self._desc_label):
             meta_layout.addWidget(lbl)
 
         layout.addWidget(meta_frame)
@@ -228,6 +230,10 @@ class _PreviewPanel(QWidget):
         _set_meta(self._res_label, "Resolution:", info.resolution or "—")
         _set_meta(self._size_label, "Size:", _fmt_size(info.file_size) if info.file_size else "—")
         _set_meta(self._tags_label, "Tags:", ", ".join(info.tags) if info.tags else "—")
+        desc = info.description
+        if len(desc) > 280:
+            desc = desc[:280].rstrip() + "…"
+        _set_meta(self._desc_label, "Description:", desc)
 
         # Show/hide action buttons based on source
         is_platform = info.source == "platform"
@@ -259,7 +265,8 @@ class _PreviewPanel(QWidget):
         self._thumb_label.setText("Select a wallpaper")
         self._name_label.setText("")
         for lbl in (self._type_label, self._author_label,
-                    self._res_label, self._size_label, self._tags_label):
+                    self._res_label, self._size_label, self._tags_label,
+                    self._desc_label):
             lbl.setText("")
         self._apply_btn.setEnabled(False)
         self._download_btn.hide()

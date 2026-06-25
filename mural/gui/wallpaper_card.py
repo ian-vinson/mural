@@ -41,6 +41,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QImageReader,
     QPainter,
     QPainterPath,
     QPixmap,
@@ -86,6 +87,7 @@ class WallpaperInfo:
         author: Author / creator name.
         tags: List of tag strings.
         source: ``"local"`` or ``"platform"``.
+        description: Long-form description from project.json, or ``""``.
     """
 
     name: str
@@ -98,6 +100,7 @@ class WallpaperInfo:
     author: str = ""
     tags: list[str] = field(default_factory=list)
     source: str = "local"
+    description: str = ""
 
     def type_label(self) -> str:
         """Return the uppercase badge label for this type."""
@@ -347,22 +350,36 @@ class WallpaperCard(QWidget):
     # ------------------------------------------------------------------
 
     def _load_thumbnail(self) -> None:
-        """Attempt to load the thumbnail from :attr:`WallpaperInfo.thumbnail_path`."""
+        """Load the thumbnail image and store a pre-scaled copy for painting."""
         thumb = self._info.thumbnail_path
         if not thumb:
             return
         path = Path(thumb)
         if not path.exists():
             return
-        px = QPixmap(str(path))
-        if px.isNull():
-            return
-        self._thumbnail = px.scaled(
-            _CARD_W,
-            _THUMB_H,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        try:
+            # QImageReader detects format from file content (magic bytes), not
+            # just the extension.  This correctly handles animated GIFs (loads
+            # the first frame), JPEG, PNG, and WebP without relying on the
+            # extension matching the actual format — common in Steam Workshop.
+            reader = QImageReader(str(path))
+            reader.setAutoTransform(True)  # honour EXIF rotation for JPEGs
+            image = reader.read()
+            if not image.isNull():
+                px = QPixmap.fromImage(image)
+            else:
+                # Fall back to the extension-based loader as a last resort.
+                px = QPixmap(str(path))
+            if px.isNull():
+                return
+            self._thumbnail = px.scaled(
+                _CARD_W,
+                _THUMB_H,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        except Exception:
+            pass
 
     def sizeHint(self) -> QSize:  # type: ignore[override]
         return QSize(_CARD_W, _CARD_H)

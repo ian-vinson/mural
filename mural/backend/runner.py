@@ -101,6 +101,9 @@ class BackendRunner:
         auto_restart: bool = True,
         max_restarts: int = 5,
         restart_grace_seconds: float = 10.0,
+        fps_limit: int = 30,
+        mute_audio: bool = False,
+        fullscreen_pause: bool = True,
     ) -> None:
         self._binary = Path(binary_path)
         self._assets = Path(assets_path) if assets_path else None
@@ -108,6 +111,9 @@ class BackendRunner:
         self._auto_restart = auto_restart
         self._max_restarts = max_restarts
         self._restart_grace = restart_grace_seconds
+        self._fps_limit = fps_limit
+        self._mute_audio = mute_audio
+        self._fullscreen_pause = fullscreen_pause
 
         self._process: subprocess.Popen[bytes] | None = None
         self._assignments: list[WallpaperAssignment] = []
@@ -172,6 +178,25 @@ class BackendRunner:
             self._intentional_stop = False
             self._start_process()
 
+    def update_playback(
+        self,
+        fps_limit: int,
+        mute_audio: bool,
+        fullscreen_pause: bool,
+    ) -> None:
+        """Update playback settings and restart lwe if it is running.
+
+        Args:
+            fps_limit: Target frame rate cap; 0 = unlimited.
+            mute_audio: Pass ``--silent`` to lwe when ``True``.
+            fullscreen_pause: When ``False``, pass ``--no-fullscreen-pause``.
+        """
+        self._fps_limit = fps_limit
+        self._mute_audio = mute_audio
+        self._fullscreen_pause = fullscreen_pause
+        if self.is_running():
+            self.restart()
+
     def is_running(self) -> bool:
         """Return ``True`` if lwe is currently running."""
         with self._lock:
@@ -194,6 +219,13 @@ class BackendRunner:
 
         if self._assets:
             cmd += ["--assets-dir", str(self._assets)]
+
+        if self._fps_limit > 0:
+            cmd += ["--fps", str(self._fps_limit)]
+        if self._mute_audio:
+            cmd.append("--silent")
+        if not self._fullscreen_pause:
+            cmd.append("--no-fullscreen-pause")
 
         for assignment in assignments:
             cmd += ["--screen-root", assignment.monitor, "--bg", assignment.wallpaper]

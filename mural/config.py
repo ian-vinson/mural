@@ -41,7 +41,7 @@ _DEFAULTS: dict[str, Any] = {
     "fps_limit": 30,
     "mute_audio": False,
     "pause_on_battery": True,
-    "fullscreen_detection": True,
+    "fullscreen_pause": True,
     # Performance
     "quality_profile": "Medium",
     # Playlist
