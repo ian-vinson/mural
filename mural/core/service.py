@@ -34,6 +34,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import signal
 import sys
 from pathlib import Path
@@ -51,6 +52,7 @@ from dasbus.typing import Str, Bool, List, Dict, Variant
 
 from mural.backend.discovery import discover, DiscoveryResult
 from mural.backend.runner import BackendRunner, WallpaperAssignment
+from mural.config import config as _cfg, DOWNLOAD_DIR
 from mural.core.monitor_manager import MonitorManager
 from mural.detection import detect, DetectionResult
 
@@ -122,6 +124,21 @@ class IMuralCore:
         """
         ...
 
+    def ApplySettings(self) -> None:
+        """Re-read playback settings from disk and restart lwe with the new flags.
+
+        Called by the GUI after the user clicks Save in Settings.
+        """
+        ...
+
+    def GetPlaylistStatus(self) -> Str:
+        """Return the current playlist rotation status.
+
+        Returns:
+            ``"active:Nmin"`` when the timer is running, or ``"disabled"``.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Service implementation
@@ -158,13 +175,19 @@ class MuralCoreService(IMuralCore):
             desktop=detection.desktop,
         )
         self._runner: BackendRunner | None = None
+        self._playlist_interval: int = 0
+        self._playlist_timer_id: int | None = None
 
+        _cfg.load()
         if discovery.binary_found:
             self._runner = BackendRunner(
                 binary_path=discovery.binary,          # type: ignore[arg-type]
                 assets_path=discovery.assets_path,
                 on_unexpected_exit=self._on_lwe_exit,
                 auto_restart=True,
+                fps_limit=int(_cfg.get("fps_limit", 30)),
+                mute_audio=bool(_cfg.get("mute_audio", False)),
+                fullscreen_pause=bool(_cfg.get("fullscreen_pause", True)),
             )
 
     # ------------------------------------------------------------------
@@ -183,8 +206,13 @@ class MuralCoreService(IMuralCore):
         self._monitor_manager.load_assignments()
         self._apply_all()
 
+        interval = int(_cfg.get("playlist_interval_minutes", 0))
+        if interval > 0:
+            self._start_playlist_timer(interval)
+
     def shutdown(self) -> None:
         """Stop the lwe subprocess cleanly.  Called on service exit."""
+        self._stop_playlist_timer()
         if self._runner and self._runner.is_running():
             logger.info("Stopping lwe subprocess")
             self._runner.stop()
@@ -249,6 +277,32 @@ class MuralCoreService(IMuralCore):
             "version": GLib.Variant("s", self.VERSION),
         }
 
+    def ApplySettings(self) -> None:  # type: ignore[override]
+        """Re-read settings from disk and restart lwe with updated playback flags."""
+        _cfg.load()
+        fps_limit = int(_cfg.get("fps_limit", 30))
+        mute_audio = bool(_cfg.get("mute_audio", False))
+        fullscreen_pause = bool(_cfg.get("fullscreen_pause", True))
+        logger.info(
+            "ApplySettings: fps=%d mute=%s fullscreen_pause=%s",
+            fps_limit, mute_audio, fullscreen_pause,
+        )
+        if self._runner:
+            self._runner.update_playback(fps_limit, mute_audio, fullscreen_pause)
+
+        interval = int(_cfg.get("playlist_interval_minutes", 0))
+        if interval != self._playlist_interval:
+            if interval > 0:
+                self._start_playlist_timer(interval)
+            else:
+                self._stop_playlist_timer()
+
+    def GetPlaylistStatus(self) -> str:  # type: ignore[override]
+        """Return the current playlist rotation status."""
+        if self._playlist_timer_id is not None and self._playlist_interval > 0:
+            return f"active:{self._playlist_interval}min"
+        return "disabled"
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -283,6 +337,73 @@ class MuralCoreService(IMuralCore):
             "lwe exited unexpectedly (returncode=%d); auto-restart is handled by runner",
             returncode,
         )
+
+    # ------------------------------------------------------------------
+    # Playlist / auto-rotate helpers
+    # ------------------------------------------------------------------
+
+    _STEAM_ROOTS = (
+        "~/.steam/steam",
+        "~/.local/share/Steam",
+        "~/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+        "~/snap/steam/common/.local/share/Steam",
+    )
+    _WORKSHOP_ID = "431960"
+
+    def _discover_library_wallpapers(self) -> list[Path]:
+        """Return all wallpaper directories visible to the playlist timer."""
+        dirs: list[Path] = []
+
+        for root_str in self._STEAM_ROOTS:
+            workshop = Path(root_str).expanduser() / "steamapps" / "workshop" / "content" / self._WORKSHOP_ID
+            if workshop.is_dir():
+                dirs.extend(p for p in workshop.iterdir() if p.is_dir())
+
+        if DOWNLOAD_DIR.is_dir():
+            dirs.extend(p for p in DOWNLOAD_DIR.iterdir() if p.is_dir())
+
+        for extra in _cfg.get("extra_library_dirs", []):
+            p = Path(extra).expanduser()
+            if p.is_dir():
+                dirs.extend(c for c in p.iterdir() if c.is_dir())
+
+        return dirs
+
+    def _start_playlist_timer(self, interval_minutes: int) -> None:
+        """Cancel any existing playlist timer and start a new one."""
+        self._stop_playlist_timer()
+        if interval_minutes <= 0:
+            return
+        self._playlist_interval = interval_minutes
+        interval_ms = interval_minutes * 60 * 1000
+        self._playlist_timer_id = GLib.timeout_add(interval_ms, self._on_playlist_tick)
+        logger.info("Playlist timer started: every %d min", interval_minutes)
+
+    def _stop_playlist_timer(self) -> None:
+        """Cancel the active playlist timer, if any."""
+        if self._playlist_timer_id is not None:
+            GLib.source_remove(self._playlist_timer_id)
+            self._playlist_timer_id = None
+            self._playlist_interval = 0
+            logger.info("Playlist timer stopped")
+
+    def _on_playlist_tick(self) -> bool:
+        """Timer callback: assign a random wallpaper to each connected monitor."""
+        wallpapers = self._discover_library_wallpapers()
+        if not wallpapers:
+            logger.warning("Playlist tick: no wallpapers found — skipping")
+            return True
+
+        if not self._monitor_manager.monitors:
+            self._monitor_manager.detect()
+
+        for monitor in self._monitor_manager.monitors:
+            wp = random.choice(wallpapers)
+            self._monitor_manager.assign_wallpaper(monitor.name, str(wp))
+            logger.info("Playlist: %s → %s", monitor.name, wp.name)
+
+        self._apply_all()
+        return True  # keep the timer alive
 
 
 # ---------------------------------------------------------------------------

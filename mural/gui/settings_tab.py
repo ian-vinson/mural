@@ -71,7 +71,7 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "fps_limit": 30,
     "mute_audio": False,
     "pause_on_battery": True,
-    "fullscreen_detection": True,
+    "fullscreen_pause": True,
     "quality_profile": "Medium",
     "autostart": True,
     "playlist_interval_minutes": 0,   # 0 = disabled
@@ -299,7 +299,7 @@ class SettingsTab(QWidget):
         # FPS limit
         fps_row = QHBoxLayout()
         self._fps_spin = QSpinBox()
-        self._fps_spin.setRange(1, 240)
+        self._fps_spin.setRange(0, 240)
         self._fps_spin.setValue(30)
         self._fps_spin.setSuffix(" fps")
         self._fps_spin.setFixedWidth(90)
@@ -356,8 +356,7 @@ class SettingsTab(QWidget):
             f"Renders at {fps_str}.  "
             "Changing the profile updates the FPS limit above and is applied on next save."
         )
-        if fps:
-            self._fps_spin.setValue(fps)
+        self._fps_spin.setValue(fps)
 
     # ------------------------------------------------------------------
     # Playlist section
@@ -389,7 +388,30 @@ class SettingsTab(QWidget):
         note.setStyleSheet("color: #888; font-size: 11px;")
         form.addRow("", note)
 
+        self._playlist_status_label = QLabel()
+        self._playlist_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        form.addRow("Status:", self._playlist_status_label)
+        self._refresh_playlist_status()
+
         return box
+
+    def _refresh_playlist_status(self) -> None:
+        """Query the Core Service for the current playlist status and update the label."""
+        if not self._core:
+            self._playlist_status_label.setText("Core Service not connected")
+            return
+        try:
+            status = self._core.GetPlaylistStatus()
+        except Exception:
+            self._playlist_status_label.setText("")
+            return
+        if status.startswith("active:"):
+            mins = status[len("active:"):-len("min")]
+            self._playlist_status_label.setText(f"Auto-rotating every {mins} minutes")
+            self._playlist_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        else:
+            self._playlist_status_label.setText("Auto-rotate disabled")
+            self._playlist_status_label.setStyleSheet("font-size: 11px; color: #888;")
 
     # ------------------------------------------------------------------
     # Autostart section
@@ -466,10 +488,10 @@ class SettingsTab(QWidget):
     def _populate_from_settings(self) -> None:
         """Fill all widgets from the current settings dict."""
         s = self._settings
-        self._fps_spin.setValue(max(1, s.get("fps_limit", 30)))
+        self._fps_spin.setValue(s.get("fps_limit", 30))
         self._mute_chk.setChecked(s.get("mute_audio", False))
         self._battery_chk.setChecked(s.get("pause_on_battery", True))
-        self._fullscreen_chk.setChecked(s.get("fullscreen_detection", True))
+        self._fullscreen_chk.setChecked(s.get("fullscreen_pause", True))
         self._autostart_chk.setChecked(s.get("autostart", True))
         self._playlist_spin.setValue(s.get("playlist_interval_minutes", 0))
 
@@ -484,7 +506,7 @@ class SettingsTab(QWidget):
             "fps_limit": self._fps_spin.value(),
             "mute_audio": self._mute_chk.isChecked(),
             "pause_on_battery": self._battery_chk.isChecked(),
-            "fullscreen_detection": self._fullscreen_chk.isChecked(),
+            "fullscreen_pause": self._fullscreen_chk.isChecked(),
             "quality_profile": self._quality_combo.currentText(),
             "autostart": self._autostart_chk.isChecked(),
             "playlist_interval_minutes": self._playlist_spin.value(),
@@ -498,11 +520,10 @@ class SettingsTab(QWidget):
 
         errors: list[str] = []
 
-        # Apply fullscreen detection via Core Service.
+        # Restart lwe with new playback flags via Core Service.
         if self._core:
             try:
-                enabled = self._settings["fullscreen_detection"]
-                self._core.SetEnabled(True)  # keep running; fullscreen handled by adapter
+                self._core.ApplySettings()
             except Exception as exc:
                 errors.append(f"D-Bus: {exc}")
 
@@ -517,6 +538,7 @@ class SettingsTab(QWidget):
                 errors.append("Could not disable mural-core.service")
 
         self._refresh_service_status()
+        self._refresh_playlist_status()
 
         if errors:
             self._status_label.setText("Saved with warnings: " + "; ".join(errors))
@@ -544,3 +566,4 @@ class SettingsTab(QWidget):
         self._core = proxy
         self._refresh_monitors()
         self._refresh_service_status()
+        self._refresh_playlist_status()
