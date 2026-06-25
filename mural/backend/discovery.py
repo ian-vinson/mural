@@ -171,6 +171,10 @@ def find_assets_path() -> Path | None:
 
         candidate = (steam_root / _ASSETS_RELATIVE).resolve()
         if candidate.is_dir():
+            assets_subdir = candidate / "assets"
+            if assets_subdir.is_dir():
+                logger.debug("Wallpaper Engine assets found at %s", assets_subdir)
+                return assets_subdir
             logger.debug("Wallpaper Engine assets found at %s", candidate)
             return candidate
 
