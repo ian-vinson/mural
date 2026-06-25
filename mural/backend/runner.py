@@ -127,6 +127,8 @@ class BackendRunner:
         fps_limit: int = 30,
         mute_audio: bool = False,
         fullscreen_pause: bool = True,
+        disable_mouse: bool = False,
+        disable_parallax: bool = False,
     ) -> None:
         self._binary = Path(binary_path)
         self._assets = Path(assets_path) if assets_path else None
@@ -137,6 +139,8 @@ class BackendRunner:
         self._fps_limit = fps_limit
         self._mute_audio = mute_audio
         self._fullscreen_pause = fullscreen_pause
+        self._disable_mouse = disable_mouse
+        self._disable_parallax = disable_parallax
 
         self._process: subprocess.Popen[bytes] | None = None
         self._assignments: list[WallpaperAssignment] = []
@@ -220,6 +224,8 @@ class BackendRunner:
         fps_limit: int,
         mute_audio: bool,
         fullscreen_pause: bool,
+        disable_mouse: bool = False,
+        disable_parallax: bool = False,
     ) -> None:
         """Update playback settings and restart lwe if it is running.
 
@@ -227,10 +233,14 @@ class BackendRunner:
             fps_limit: Target frame rate cap; 0 = unlimited.
             mute_audio: Pass ``--silent`` to lwe when ``True``.
             fullscreen_pause: When ``False``, pass ``--no-fullscreen-pause``.
+            disable_mouse: When ``True``, pass ``--disable-mouse``.
+            disable_parallax: When ``True``, pass ``--disable-parallax``.
         """
         self._fps_limit = fps_limit
         self._mute_audio = mute_audio
         self._fullscreen_pause = fullscreen_pause
+        self._disable_mouse = disable_mouse
+        self._disable_parallax = disable_parallax
         if self.is_running():
             self.restart()
 
@@ -263,6 +273,10 @@ class BackendRunner:
             cmd.append("--silent")
         if not self._fullscreen_pause:
             cmd.append("--no-fullscreen-pause")
+        if self._disable_mouse:
+            cmd.append("--disable-mouse")
+        if self._disable_parallax:
+            cmd.append("--disable-parallax")
 
         for assignment in assignments:
             cmd += ["--screen-root", assignment.monitor, "--bg", assignment.wallpaper]

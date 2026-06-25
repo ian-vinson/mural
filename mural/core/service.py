@@ -170,6 +170,10 @@ class IMuralCore:
         """Return ``"paused:<appname>"`` or ``"running"``."""
         ...
 
+    def GetScheduleStatus(self) -> Str:
+        """Return the name of the currently active time-of-day slot, or ``"none"``."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Service implementation
@@ -221,6 +225,10 @@ class MuralCoreService(IMuralCore):
         self._battery_timer_id: int | None = None
         self._app_timer_id: int | None = None
 
+        # Time-of-day schedule state
+        self._schedule_timer_id: int | None = None
+        self._schedule_last_slot: str = ""
+
         _cfg.load()
         if discovery.binary_found:
             self._runner = BackendRunner(
@@ -231,6 +239,8 @@ class MuralCoreService(IMuralCore):
                 fps_limit=int(_cfg.get("fps_limit", 30)),
                 mute_audio=bool(_cfg.get("mute_audio", False)),
                 fullscreen_pause=bool(_cfg.get("fullscreen_pause", True)),
+                disable_mouse=bool(_cfg.get("disable_mouse", False)),
+                disable_parallax=bool(_cfg.get("disable_parallax", False)),
             )
 
     # ------------------------------------------------------------------
@@ -255,6 +265,7 @@ class MuralCoreService(IMuralCore):
 
         self._battery_timer_id = GLib.timeout_add_seconds(60, self._on_battery_tick)
         self._app_timer_id = GLib.timeout_add_seconds(10, self._on_app_rule_tick)
+        self._start_schedule_timer()
 
     def shutdown(self) -> None:
         """Stop all timers and the lwe subprocess."""
@@ -265,6 +276,7 @@ class MuralCoreService(IMuralCore):
         if self._app_timer_id is not None:
             GLib.source_remove(self._app_timer_id)
             self._app_timer_id = None
+        self._stop_schedule_timer()
         if self._runner and self._runner.is_running():
             logger.info("Stopping lwe subprocess")
             self._runner.stop()
@@ -326,14 +338,21 @@ class MuralCoreService(IMuralCore):
         fps_limit = int(_cfg.get("fps_limit", 30))
         mute_audio = bool(_cfg.get("mute_audio", False))
         fullscreen_pause = bool(_cfg.get("fullscreen_pause", True))
-        logger.info("ApplySettings: fps=%d mute=%s fullscreen_pause=%s",
-                    fps_limit, mute_audio, fullscreen_pause)
+        disable_mouse = bool(_cfg.get("disable_mouse", False))
+        disable_parallax = bool(_cfg.get("disable_parallax", False))
+        logger.info(
+            "ApplySettings: fps=%d mute=%s fullscreen_pause=%s disable_mouse=%s disable_parallax=%s",
+            fps_limit, mute_audio, fullscreen_pause, disable_mouse, disable_parallax,
+        )
         if self._runner:
-            self._runner.update_playback(fps_limit, mute_audio, fullscreen_pause)
+            self._runner.update_playback(
+                fps_limit, mute_audio, fullscreen_pause, disable_mouse, disable_parallax
+            )
         self._update_tick_timer()
-        # Re-evaluate pause conditions with updated config.
+        # Re-evaluate pause conditions and schedule with updated config.
         self._check_battery_pause()
         self._check_app_rule_pause()
+        self._restart_schedule_timer()
 
     # ------------------------------------------------------------------
     # Playlist D-Bus — read
@@ -620,6 +639,105 @@ class MuralCoreService(IMuralCore):
         pl.item_durations[index] = max(0, minutes)
         self._playlists.save()
         return True
+
+    def GetScheduleStatus(self) -> str:  # type: ignore[override]
+        return self._schedule_last_slot or "none"
+
+    # ------------------------------------------------------------------
+    # Time-of-day schedule
+    # ------------------------------------------------------------------
+
+    def _start_schedule_timer(self) -> None:
+        """Start the 60-second schedule timer if scheduling is configured and enabled."""
+        if not bool(_cfg.get("time_schedule_enabled", False)):
+            return
+        schedule = _cfg.get("time_schedule", [])
+        if not any(e.get("path") for e in schedule if isinstance(e, dict)):
+            return
+        # Immediately apply whichever slot should be active right now.
+        self._check_schedule_now(initial=True)
+        if self._schedule_timer_id is None:
+            self._schedule_timer_id = GLib.timeout_add_seconds(60, self._on_schedule_tick)
+            logger.info("Schedule timer started")
+
+    def _stop_schedule_timer(self) -> None:
+        if self._schedule_timer_id is not None:
+            GLib.source_remove(self._schedule_timer_id)
+            self._schedule_timer_id = None
+            logger.info("Schedule timer stopped")
+
+    def _restart_schedule_timer(self) -> None:
+        self._stop_schedule_timer()
+        self._schedule_last_slot = ""  # reset so the slot re-fires on next start
+        self._start_schedule_timer()
+
+    def _on_schedule_tick(self) -> bool:
+        self._check_schedule_now(initial=False)
+        return True  # keep timer alive
+
+    def _check_schedule_now(self, initial: bool = False) -> None:
+        """Determine the currently active time slot and apply it if it changed."""
+        import datetime
+        if not bool(_cfg.get("time_schedule_enabled", False)):
+            return
+        schedule = _cfg.get("time_schedule", [])
+        if not schedule:
+            return
+
+        now = datetime.datetime.now()
+        current_minutes = now.hour * 60 + now.minute
+
+        # Find the slot with the latest start time that has already passed today.
+        active_entry: dict | None = None
+        best_minutes = -1
+        for entry in schedule:
+            if not isinstance(entry, dict) or not entry.get("path"):
+                continue
+            try:
+                h, m = map(int, entry.get("time", "00:00").split(":"))
+            except (ValueError, AttributeError):
+                continue
+            slot_minutes = h * 60 + m
+            if slot_minutes <= current_minutes and slot_minutes > best_minutes:
+                best_minutes = slot_minutes
+                active_entry = entry
+
+        # Day wraparound: no slot has fired yet today — use the latest slot from "yesterday".
+        if active_entry is None:
+            best_minutes = -1
+            for entry in schedule:
+                if not isinstance(entry, dict) or not entry.get("path"):
+                    continue
+                try:
+                    h, m = map(int, entry.get("time", "00:00").split(":"))
+                except (ValueError, AttributeError):
+                    continue
+                slot_minutes = h * 60 + m
+                if slot_minutes > best_minutes:
+                    best_minutes = slot_minutes
+                    active_entry = entry
+
+        if active_entry is None:
+            return
+
+        slot_name = active_entry.get("slot", "")
+        path = active_entry.get("path", "")
+
+        # Don't re-fire the same slot every tick.
+        if slot_name == self._schedule_last_slot and not initial:
+            return
+
+        self._schedule_last_slot = slot_name
+        if path and Path(path).exists():
+            monitors = self.GetMonitors()
+            for monitor in monitors:
+                self._monitor_manager.assign_wallpaper(monitor, path)
+                logger.info(
+                    "Schedule slot %r → %s on %s",
+                    slot_name, Path(path).name, monitor,
+                )
+            if monitors:
+                self._apply_all()
 
     # ------------------------------------------------------------------
     # Playlist tick timer

@@ -37,11 +37,14 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTime, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -53,6 +56,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -75,18 +79,171 @@ _QUALITY_PROFILES: dict[str, dict[str, Any]] = {
     "Ultra":  {"fps": 0,  "noautomute": True,  "quality": "ultra"},
 }
 
+_SCHEDULE_SLOTS = [
+    ("morning",   "Morning",   "06:00"),
+    ("afternoon", "Afternoon", "12:00"),
+    ("evening",   "Evening",   "18:00"),
+    ("night",     "Night",     "22:00"),
+]
+
 _DEFAULT_SETTINGS: dict[str, Any] = {
     "fps_limit": 30,
     "mute_audio": False,
     "pause_on_battery": True,
     "fullscreen_pause": True,
+    "disable_mouse": False,
+    "disable_parallax": False,
     "quality_profile": "Medium",
     "autostart": True,
     "playlist_interval_minutes": 0,   # 0 = disabled
     "monitor_assignments": {},
     "pywal_on_change": False,
     "pause_app_list": [],
+    "time_schedule_enabled": False,
+    "time_schedule": [
+        {"slot": "morning",   "time": "06:00", "path": ""},
+        {"slot": "afternoon", "time": "12:00", "path": ""},
+        {"slot": "evening",   "time": "18:00", "path": ""},
+        {"slot": "night",     "time": "22:00", "path": ""},
+    ],
 }
+
+
+def _schedule_preview_image(wallpaper_path: str) -> str | None:
+    """Return a path to a preview image for *wallpaper_path*, or None."""
+    p = Path(wallpaper_path)
+    if not p.is_dir():
+        return None
+    for name in ("preview.jpg", "preview.png", "preview.gif",
+                 "preview.webp", "thumbnail.jpg", "thumbnail.png"):
+        candidate = p / name
+        if candidate.exists():
+            return str(candidate)
+    proj = p / "project.json"
+    if proj.exists():
+        try:
+            data = json.loads(proj.read_text(encoding="utf-8"))
+            preview = data.get("preview", "")
+            if preview and (p / preview).exists():
+                return str(p / preview)
+        except Exception:
+            pass
+    return None
+
+
+def _scan_library_dirs() -> list[Path]:
+    """Return up to 200 wallpaper dirs from Steam Workshop + download dirs."""
+    from mural.config import config as _mcfg, DOWNLOAD_DIR as _DDIR
+
+    _STEAM_ROOTS = (
+        "~/.steam/steam",
+        "~/.local/share/Steam",
+        "~/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+        "~/snap/steam/common/.local/share/Steam",
+    )
+    _WS_ID = "431960"
+
+    dirs: list[Path] = []
+    for root_str in _STEAM_ROOTS:
+        wp = Path(root_str).expanduser() / "steamapps" / "workshop" / "content" / _WS_ID
+        if wp.is_dir():
+            dirs.extend(p for p in wp.iterdir() if p.is_dir())
+    if _DDIR.is_dir():
+        dirs.extend(p for p in _DDIR.iterdir() if p.is_dir())
+    for extra in _mcfg.get("extra_library_dirs", []):
+        ep = Path(extra).expanduser()
+        if ep.is_dir():
+            dirs.extend(c for c in ep.iterdir() if c.is_dir())
+    return dirs[:200]
+
+
+class _WallpaperPickerDialog(QDialog):
+    """Minimal wallpaper picker that shows WallpaperCards from the local library."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from mural.gui.wallpaper_card import WallpaperCard, WallpaperInfo
+
+        self.setWindowTitle("Pick Wallpaper")
+        self.resize(780, 520)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self._selected_path: str | None = None
+
+        # Scrollable card grid
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setContentsMargins(4, 4, 4, 4)
+        grid.setSpacing(8)
+
+        dirs = _scan_library_dirs()
+        COLS = 4
+        for i, wp_dir in enumerate(dirs):
+            name = wp_dir.name
+            wp_type = "video"
+            thumbnail = _schedule_preview_image(str(wp_dir))
+            proj = wp_dir / "project.json"
+            if proj.exists():
+                try:
+                    pdata = json.loads(proj.read_text(encoding="utf-8"))
+                    name = pdata.get("title") or name
+                    wp_type = pdata.get("type", "video").lower()
+                except Exception:
+                    pass
+            info = WallpaperInfo(
+                name=name,
+                path=str(wp_dir),
+                type=wp_type,
+                thumbnail_path=thumbnail,
+            )
+            card = WallpaperCard(info)
+            card.selected.connect(
+                lambda inf, s=self: setattr(s, "_selected_path", inf.path)
+            )
+            card.apply_requested.connect(self._on_apply_requested)
+            grid.addWidget(card, i // COLS, i % COLS)
+
+        if not dirs:
+            no_lbl = QLabel(
+                "No wallpapers found.\n"
+                "Add wallpapers to your library first."
+            )
+            no_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            no_lbl.setStyleSheet("color: #888; font-size: 13px;")
+            grid.addWidget(no_lbl, 0, 0)
+
+        content.setLayout(grid)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        select_btn = QPushButton("Select")
+        select_btn.setDefault(True)
+        select_btn.clicked.connect(self._on_select)
+        btn_row.addWidget(select_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _on_apply_requested(self, info) -> None:
+        self._selected_path = info.path
+        self.accept()
+
+    def _on_select(self) -> None:
+        if self._selected_path:
+            self.accept()
+
+    def get_selected_path(self) -> str | None:
+        return self._selected_path
 
 
 def _load_settings() -> dict[str, Any]:
@@ -177,6 +334,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_playback_section())
         layout.addWidget(self._build_performance_section())
         layout.addWidget(self._build_playlist_section())
+        layout.addWidget(self._build_schedule_section())
         layout.addWidget(self._build_linux_integration_section())
         layout.addWidget(self._build_app_rules_section())
         layout.addWidget(self._build_autostart_section())
@@ -383,6 +541,12 @@ class SettingsTab(QWidget):
         )
         form.addRow("Fullscreen:", self._fullscreen_chk)
 
+        self._disable_mouse_chk = QCheckBox("Disable mouse parallax effects")
+        form.addRow("Mouse:", self._disable_mouse_chk)
+
+        self._disable_parallax_chk = QCheckBox("Disable parallax depth effect")
+        form.addRow("Parallax:", self._disable_parallax_chk)
+
         return box
 
     # ------------------------------------------------------------------
@@ -513,6 +677,138 @@ class SettingsTab(QWidget):
         else:
             self._playlist_status_label.setText("Auto-rotate disabled")
             self._playlist_status_label.setStyleSheet("font-size: 11px; color: #888;")
+
+    # ------------------------------------------------------------------
+    # Time-of-day schedule section
+    # ------------------------------------------------------------------
+
+    def _build_schedule_section(self) -> QGroupBox:
+        box = QGroupBox("Time of Day")
+        outer = QVBoxLayout(box)
+        outer.setSpacing(8)
+
+        self._sched_enabled_chk = QCheckBox("Enable time of day scheduling")
+        self._sched_enabled_chk.toggled.connect(self._on_sched_enabled_changed)
+        outer.addWidget(self._sched_enabled_chk)
+
+        # One row per slot
+        self._sched_rows: list[dict] = []
+        self._sched_slots_widget = QWidget()
+        slots_layout = QVBoxLayout(self._sched_slots_widget)
+        slots_layout.setContentsMargins(0, 0, 0, 0)
+        slots_layout.setSpacing(6)
+
+        for slot_key, slot_label, default_time in _SCHEDULE_SLOTS:
+            row: dict = {"slot_key": slot_key, "path": ""}
+            h = QHBoxLayout()
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+
+            lbl = QLabel(slot_label)
+            lbl.setFixedWidth(68)
+            h.addWidget(lbl)
+
+            te = QTimeEdit()
+            te.setDisplayFormat("HH:mm")
+            te.setFixedWidth(68)
+            dh, dm = map(int, default_time.split(":"))
+            te.setTime(QTime(dh, dm))
+            row["time_edit"] = te
+            h.addWidget(te)
+
+            thumb = QLabel()
+            thumb.setFixedSize(60, 40)
+            thumb.setStyleSheet(
+                "background: #1a1a2e; border: 1px solid #333; border-radius: 2px;"
+            )
+            thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            row["thumb_label"] = thumb
+            h.addWidget(thumb)
+
+            path_lbl = QLabel("(not set)")
+            path_lbl.setStyleSheet("color: #888; font-size: 11px;")
+            path_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            row["path_label"] = path_lbl
+            h.addWidget(path_lbl, 1)
+
+            pick_btn = QPushButton("Pick…")
+            pick_btn.setFixedHeight(26)
+            pick_btn.setFixedWidth(48)
+            pick_btn.clicked.connect(
+                lambda _c=False, r=row: self._pick_schedule_wallpaper(r)
+            )
+            h.addWidget(pick_btn)
+
+            clear_btn = QPushButton("×")
+            clear_btn.setFixedSize(26, 26)
+            clear_btn.clicked.connect(
+                lambda _c=False, r=row: self._set_schedule_path(r, "")
+            )
+            h.addWidget(clear_btn)
+
+            slots_layout.addLayout(h)
+            self._sched_rows.append(row)
+
+        outer.addWidget(self._sched_slots_widget)
+
+        self._sched_status_label = QLabel()
+        self._sched_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        outer.addWidget(self._sched_status_label)
+
+        return box
+
+    def _on_sched_enabled_changed(self, checked: bool) -> None:
+        self._sched_slots_widget.setEnabled(checked)
+
+    def _pick_schedule_wallpaper(self, row: dict) -> None:
+        dlg = _WallpaperPickerDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            path = dlg.get_selected_path()
+            if path:
+                self._set_schedule_path(row, path)
+
+    def _set_schedule_path(self, row: dict, path: str) -> None:
+        row["path"] = path
+        if path:
+            row["path_label"].setText(Path(path).name)
+            row["path_label"].setStyleSheet("font-size: 11px; color: #e0e0e0;")
+            preview = _schedule_preview_image(path)
+            if preview:
+                px = QPixmap(preview)
+                if not px.isNull():
+                    row["thumb_label"].setPixmap(
+                        px.scaled(
+                            60, 40,
+                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+                    return
+            row["thumb_label"].clear()
+            row["thumb_label"].setText("?")
+        else:
+            row["path_label"].setText("(not set)")
+            row["path_label"].setStyleSheet("color: #888; font-size: 11px;")
+            row["thumb_label"].clear()
+
+    def _refresh_schedule_status(self) -> None:
+        if not self._core:
+            self._sched_status_label.setText("")
+            return
+        try:
+            active = self._core.GetScheduleStatus()
+        except Exception:
+            self._sched_status_label.setText("")
+            return
+        if active and active != "none":
+            self._sched_status_label.setText(f"Active slot: {active.capitalize()}")
+            self._sched_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        elif self._sched_enabled_chk.isChecked():
+            self._sched_status_label.setText("Scheduling enabled — no slot active yet")
+            self._sched_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        else:
+            self._sched_status_label.setText("Time scheduling disabled")
+            self._sched_status_label.setStyleSheet("font-size: 11px; color: #888;")
 
     # ------------------------------------------------------------------
     # Linux Integration section
@@ -688,6 +984,8 @@ class SettingsTab(QWidget):
         self._mute_chk.setChecked(s.get("mute_audio", False))
         self._battery_chk.setChecked(s.get("pause_on_battery", True))
         self._fullscreen_chk.setChecked(s.get("fullscreen_pause", True))
+        self._disable_mouse_chk.setChecked(s.get("disable_mouse", False))
+        self._disable_parallax_chk.setChecked(s.get("disable_parallax", False))
         self._autostart_chk.setChecked(s.get("autostart", True))
         self._playlist_spin.setValue(s.get("playlist_interval_minutes", 0))
         self._pywal_chk.setChecked(s.get("pywal_on_change", False))
@@ -700,8 +998,29 @@ class SettingsTab(QWidget):
         if idx >= 0:
             self._quality_combo.setCurrentIndex(idx)
 
+        # Time-of-day schedule
+        enabled = bool(s.get("time_schedule_enabled", False))
+        self._sched_enabled_chk.setChecked(enabled)
+        self._on_sched_enabled_changed(enabled)
+        schedule = s.get("time_schedule", [])
+        slot_map = {
+            e.get("slot", ""): e
+            for e in schedule
+            if isinstance(e, dict)
+        }
+        for row in self._sched_rows:
+            entry = slot_map.get(row["slot_key"], {})
+            time_str = entry.get("time", "00:00")
+            try:
+                th, tm = map(int, time_str.split(":"))
+            except (ValueError, AttributeError):
+                th, tm = 0, 0
+            row["time_edit"].setTime(QTime(th, tm))
+            self._set_schedule_path(row, entry.get("path", ""))
+
         self._refresh_battery_status()
         self._refresh_app_rule_status()
+        self._refresh_schedule_status()
 
     def _collect_settings(self) -> dict[str, Any]:
         """Read all widget values into a settings dict."""
@@ -709,17 +1028,29 @@ class SettingsTab(QWidget):
         pause_app_list = [
             line.strip() for line in raw_app_text.splitlines() if line.strip()
         ]
+        schedule = [
+            {
+                "slot": row["slot_key"],
+                "time": row["time_edit"].time().toString("HH:mm"),
+                "path": row.get("path", ""),
+            }
+            for row in self._sched_rows
+        ]
         return {
             "fps_limit": self._fps_spin.value(),
             "mute_audio": self._mute_chk.isChecked(),
             "pause_on_battery": self._battery_chk.isChecked(),
             "fullscreen_pause": self._fullscreen_chk.isChecked(),
+            "disable_mouse": self._disable_mouse_chk.isChecked(),
+            "disable_parallax": self._disable_parallax_chk.isChecked(),
             "quality_profile": self._quality_combo.currentText(),
             "autostart": self._autostart_chk.isChecked(),
             "playlist_interval_minutes": self._playlist_spin.value(),
             "monitor_assignments": self._collect_monitor_assignments(),
             "pywal_on_change": self._pywal_chk.isChecked(),
             "pause_app_list": pause_app_list,
+            "time_schedule_enabled": self._sched_enabled_chk.isChecked(),
+            "time_schedule": schedule,
         }
 
     def _save(self) -> None:
@@ -750,6 +1081,7 @@ class SettingsTab(QWidget):
         self._refresh_playlist_status()
         self._refresh_battery_status()
         self._refresh_app_rule_status()
+        self._refresh_schedule_status()
 
         if errors:
             self._status_label.setText("Saved with warnings: " + "; ".join(errors))
@@ -780,3 +1112,4 @@ class SettingsTab(QWidget):
         self._refresh_playlist_status()
         self._refresh_battery_status()
         self._refresh_app_rule_status()
+        self._refresh_schedule_status()
