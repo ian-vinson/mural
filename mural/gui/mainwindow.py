@@ -49,6 +49,7 @@ PlatformTab.wallpaper_downloaded→ LibraryTab.refresh
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -567,8 +569,8 @@ class MainWindow(QMainWindow):
         self._platform_tab.wallpaper_selected.connect(self._preview.show_wallpaper)
         self._platform_tab.wallpaper_apply_requested.connect(self._on_quick_apply)
 
-        # Right-click "Add to Playlist" in Library → playlist tab.
-        self._library_tab.add_to_playlist_requested.connect(self._playlist_tab.add_item)
+        # Right-click "Add to Playlist" in Library → playlist chooser.
+        self._library_tab.add_to_playlist_requested.connect(self._on_add_to_playlist)
 
         # Downloaded platform wallpaper → refresh local library.
         self._platform_tab.wallpaper_downloaded.connect(self._on_download_complete)
@@ -635,6 +637,46 @@ class MainWindow(QMainWindow):
                 )
             except Exception as exc:
                 self.statusBar().showMessage(f"Apply failed: {exc}", 5000)
+
+    def _on_add_to_playlist(self, info: WallpaperInfo) -> None:
+        """Show a playlist chooser, then add *info* to the selected playlist."""
+        if not self._core:
+            self.statusBar().showMessage(
+                "Service unavailable — start mural-core.service", 5000
+            )
+            return
+        try:
+            playlists = json.loads(self._core.GetPlaylists())
+        except Exception:
+            return
+
+        if not playlists:
+            self._switch_tab(2)
+            self.statusBar().showMessage(
+                "No playlists yet — create one in the Playlist tab first.", 5000
+            )
+            return
+
+        if len(playlists) == 1:
+            pl = playlists[0]
+            self._playlist_tab.add_item_to_playlist(info, pl["id"])
+            self.statusBar().showMessage(
+                f"Added '{info.name}' to '{pl['name']}'", 4000
+            )
+            return
+
+        # Multiple playlists — show a chooser menu at the cursor position.
+        from PySide6.QtGui import QCursor  # noqa: PLC0415
+        menu = QMenu(self)
+        for pl in playlists:
+            act = menu.addAction(pl["name"])
+            act.setData(pl["id"])
+        chosen = menu.exec(QCursor.pos())
+        if chosen:
+            self._playlist_tab.add_item_to_playlist(info, chosen.data())
+            self.statusBar().showMessage(
+                f"Added '{info.name}' to '{chosen.text()}'", 4000
+            )
 
     def _on_download_complete(self, local_path: str) -> None:
         """Refresh the library and show a status message after a download."""

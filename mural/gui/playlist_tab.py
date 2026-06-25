@@ -26,10 +26,12 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -137,6 +139,12 @@ class PlaylistTab(QWidget):
         btn_row.addWidget(self._del_btn)
 
         layout.addLayout(btn_row)
+
+        self._status_label = QLabel()
+        self._status_label.setWordWrap(True)
+        self._status_label.setStyleSheet("color: #888; font-size: 10px;")
+        layout.addWidget(self._status_label)
+
         return w
 
     # ------ Right panel: editor ------
@@ -261,16 +269,10 @@ class PlaylistTab(QWidget):
             except Exception:
                 pass
 
-        self._rebuild_pl_list()
+        # Build monitor checkboxes FIRST so _populate_editor sees fresh widgets
+        # when _rebuild_pl_list fires the selection signal.
         self._rebuild_monitor_checkboxes()
-
-        # Re-select previously selected playlist.
-        if self._selected_id:
-            for i in range(self._pl_list.count()):
-                item = self._pl_list.item(i)
-                if item and item.data(Qt.ItemDataRole.UserRole) == self._selected_id:
-                    self._pl_list.setCurrentItem(item)
-                    break
+        self._rebuild_pl_list()
 
     def _get_playlist(self, playlist_id: str) -> dict | None:
         return next((p for p in self._playlists if p["id"] == playlist_id), None)
@@ -298,9 +300,13 @@ class PlaylistTab(QWidget):
 
     def _rebuild_monitor_checkboxes(self) -> None:
         """Rebuild the monitor assignment checkboxes."""
-        for chk in self._mon_checkboxes.values():
-            self._mon_layout.removeWidget(chk)
-            chk.deleteLater()
+        # Clear ALL layout items — this removes stale checkboxes, the
+        # "No monitors" fallback label, and accumulated stretch spacers.
+        while self._mon_layout.count():
+            item = self._mon_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
         self._mon_checkboxes.clear()
 
         for mon in self._monitor_names:
@@ -389,19 +395,20 @@ class PlaylistTab(QWidget):
 
     def _create_playlist(self) -> None:
         if not self._core:
+            self._status_label.setText("Service unavailable — start mural-core.service")
+            return
+        name, ok = QInputDialog.getText(self, "New Playlist", "Playlist name:")
+        if not ok or not name.strip():
             return
         try:
-            new_id = self._core.CreatePlaylist("New Playlist")
-        except Exception:
+            new_id = self._core.CreatePlaylist(name.strip())
+        except Exception as exc:
+            self._status_label.setText(f"Error: {exc}")
             return
+        self._status_label.setText("")
         self._selected_id = new_id
         self._reload()
-        # Select the new item and focus the name field.
-        for i in range(self._pl_list.count()):
-            it = self._pl_list.item(i)
-            if it and it.data(Qt.ItemDataRole.UserRole) == new_id:
-                self._pl_list.setCurrentItem(it)
-                break
+        # _rebuild_pl_list already restored the selection; just focus the name field.
         self._name_edit.selectAll()
         self._name_edit.setFocus()
 
@@ -410,7 +417,8 @@ class PlaylistTab(QWidget):
             return
         try:
             self._core.DeletePlaylist(self._selected_id)
-        except Exception:
+        except Exception as exc:
+            self._status_label.setText(f"Error: {exc}")
             return
         self._selected_id = None
         self._reload()
@@ -562,25 +570,40 @@ class PlaylistTab(QWidget):
     # Public API (called from MainWindow)
     # ------------------------------------------------------------------
 
-    def add_item(self, info: WallpaperInfo) -> None:
-        """Add *info* to the currently selected playlist (or first playlist)."""
+    def add_item_to_playlist(self, info: WallpaperInfo, playlist_id: str) -> None:
+        """Add *info.path* to the playlist identified by *playlist_id*.
+
+        Called by MainWindow after the user picks a playlist from the
+        chooser menu shown on right-click → Add to Playlist.
+        """
         if not self._core:
+            return
+        try:
+            ok = self._core.AddToPlaylist(playlist_id, info.path)
+        except Exception:
+            return
+        if ok and playlist_id == self._selected_id:
+            self._add_wp_item(info.path)
+            pl = self._get_playlist(playlist_id)
+            if pl:
+                pl.setdefault("wallpaper_paths", []).append(info.path)
+                self._update_wp_status(pl)
+
+    def add_item(self, info: WallpaperInfo) -> None:
+        """Add *info* to the currently selected playlist (or first playlist).
+
+        Kept for backward compatibility; prefer ``add_item_to_playlist``.
+        """
+        if not self._core:
+            self._status_label.setText("Service unavailable — start mural-core.service")
             return
         target_id = self._selected_id
         if not target_id and self._playlists:
             target_id = self._playlists[0]["id"]
         if not target_id:
+            self._status_label.setText("No playlist selected — create one first")
             return
-        try:
-            ok = self._core.AddToPlaylist(target_id, info.path)
-        except Exception:
-            return
-        if ok and target_id == self._selected_id:
-            self._add_wp_item(info.path)
-            pl = self._get_playlist(target_id)
-            if pl:
-                pl.setdefault("wallpaper_paths", []).append(info.path)
-                self._update_wp_status(pl)
+        self.add_item_to_playlist(info, target_id)
 
     def set_core_proxy(self, proxy: Any) -> None:
         """Update the service proxy and refresh."""
