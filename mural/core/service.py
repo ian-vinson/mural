@@ -37,6 +37,7 @@ import os
 import random
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -244,7 +245,10 @@ class MuralCoreService(IMuralCore):
             return False
 
         self._monitor_manager.assign_wallpaper(monitor, path)
-        return self._apply_all()
+        result = self._apply_all()
+        if result and bool(_cfg.get("pywal_on_change", False)):
+            self._run_pywal_async(path)
+        return result
 
     def GetCurrentWallpaper(self, monitor: str) -> str:  # type: ignore[override]
         assignment = self._monitor_manager.get_assignment(monitor)
@@ -448,6 +452,23 @@ class MuralCoreService(IMuralCore):
         logger.warning("lwe exited unexpectedly (returncode=%d); auto-restart handled by runner",
                        returncode)
 
+    def _run_pywal_async(self, wallpaper_path: str) -> None:
+        """Apply pywal in a daemon thread so wallpaper switching is not blocked."""
+        from mural.utils.palette import apply_pywal
+
+        def _worker() -> None:
+            preview = _find_preview_image(wallpaper_path)
+            if not preview:
+                logger.debug("pywal: no preview image found in %s", wallpaper_path)
+                return
+            ok = apply_pywal(preview)
+            if ok:
+                logger.info("pywal: applied theme from %s", preview)
+            else:
+                logger.debug("pywal: not available or returned non-zero")
+
+        threading.Thread(target=_worker, daemon=True, name="pywal-worker").start()
+
     # ------------------------------------------------------------------
     # Playlist tick timer
     # ------------------------------------------------------------------
@@ -531,6 +552,42 @@ class MuralCoreService(IMuralCore):
             if p.is_dir():
                 dirs.extend(c for c in p.iterdir() if c.is_dir())
         return dirs
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+_PREVIEW_NAMES = (
+    "preview.jpg", "preview.png", "preview.gif",
+    "thumbnail.jpg", "thumbnail.png",
+)
+
+
+def _find_preview_image(wallpaper_dir: str) -> str | None:
+    """Return the path to the best preview image for *wallpaper_dir*, or None.
+
+    Checks ``project.json`` first, then falls back to common filenames.
+    """
+    p = Path(wallpaper_dir)
+    if not p.is_dir():
+        return None
+    proj = p / "project.json"
+    if proj.exists():
+        try:
+            data = json.loads(proj.read_text(encoding="utf-8"))
+            preview = data.get("preview", "")
+            if preview:
+                candidate = p / preview
+                if candidate.exists():
+                    return str(candidate)
+        except Exception:
+            pass
+    for name in _PREVIEW_NAMES:
+        candidate = p / name
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -32,11 +32,10 @@ to the Core Service immediately via D-Bus when Save is clicked.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
-
-import json
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -78,6 +77,7 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "autostart": True,
     "playlist_interval_minutes": 0,   # 0 = disabled
     "monitor_assignments": {},
+    "pywal_on_change": False,
 }
 
 
@@ -169,6 +169,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_playback_section())
         layout.addWidget(self._build_performance_section())
         layout.addWidget(self._build_playlist_section())
+        layout.addWidget(self._build_linux_integration_section())
         layout.addWidget(self._build_autostart_section())
         layout.addStretch()
 
@@ -472,6 +473,35 @@ class SettingsTab(QWidget):
             self._playlist_status_label.setStyleSheet("font-size: 11px; color: #888;")
 
     # ------------------------------------------------------------------
+    # Linux Integration section
+    # ------------------------------------------------------------------
+
+    def _build_linux_integration_section(self) -> QGroupBox:
+        box = QGroupBox("Linux Integration")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
+
+        self._pywal_chk = QCheckBox(
+            "Apply pywal color scheme on wallpaper change"
+        )
+        form.addRow("Pywal:", self._pywal_chk)
+
+        self._pywal_status_label = QLabel()
+        if shutil.which("wal"):
+            self._pywal_status_label.setText("pywal detected")
+            self._pywal_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        else:
+            self._pywal_status_label.setText(
+                "pywal not found — install python-pywal"
+            )
+            self._pywal_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        form.addRow("", self._pywal_status_label)
+
+        return box
+
+    # ------------------------------------------------------------------
     # Autostart section
     # ------------------------------------------------------------------
 
@@ -552,6 +582,7 @@ class SettingsTab(QWidget):
         self._fullscreen_chk.setChecked(s.get("fullscreen_pause", True))
         self._autostart_chk.setChecked(s.get("autostart", True))
         self._playlist_spin.setValue(s.get("playlist_interval_minutes", 0))
+        self._pywal_chk.setChecked(s.get("pywal_on_change", False))
 
         profile = s.get("quality_profile", "Medium")
         idx = self._quality_combo.findText(profile)
@@ -569,6 +600,7 @@ class SettingsTab(QWidget):
             "autostart": self._autostart_chk.isChecked(),
             "playlist_interval_minutes": self._playlist_spin.value(),
             "monitor_assignments": self._collect_monitor_assignments(),
+            "pywal_on_change": self._pywal_chk.isChecked(),
         }
 
     def _save(self) -> None:

@@ -54,9 +54,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap
+from PySide6.QtCore import QSize, Qt, QThread, QTimer
+from PySide6.QtCore import Signal
+from PySide6.QtGui import QAction, QCursor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -72,6 +74,7 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QTabBar,
     QToolBar,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -87,6 +90,28 @@ _PREVIEW_MAX_W = 380
 _THUMB_MAX_H   = 200
 _WIN_MIN_W     = 920
 _WIN_MIN_H     = 580
+
+
+# ---------------------------------------------------------------------------
+# Background palette worker
+# ---------------------------------------------------------------------------
+
+class _PaletteWorker(QThread):
+    """Extracts a color palette from an image in a background thread."""
+
+    palette_ready = Signal(list)  # list[str] of hex colors, empty on failure
+
+    def __init__(self, image_path: str) -> None:
+        super().__init__()
+        self._image_path = image_path
+
+    def run(self) -> None:
+        try:
+            from mural.utils.palette import extract_palette
+            colors = extract_palette(self._image_path)
+        except Exception:
+            colors = []
+        self.palette_ready.emit(colors)
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +138,9 @@ class _PreviewPanel(QWidget):
         self._core = core_proxy
         self._platform_tab = platform_tab
         self._current_info: WallpaperInfo | None = None
+        self._current_palette: list[str] = []
+        self._palette_gen: int = 0
+        self._active_worker: _PaletteWorker | None = None
 
         self.setMinimumWidth(_PREVIEW_MIN_W)
         self.setMaximumWidth(_PREVIEW_MAX_W)
@@ -162,6 +190,33 @@ class _PreviewPanel(QWidget):
                     self._res_label, self._size_label, self._tags_label,
                     self._desc_label):
             meta_layout.addWidget(lbl)
+
+        # Color palette swatches row
+        self._colors_row = QWidget()
+        cr_layout = QHBoxLayout(self._colors_row)
+        cr_layout.setContentsMargins(0, 2, 0, 2)
+        cr_layout.setSpacing(4)
+        cr_lbl = QLabel("<b>Colors:</b>")
+        cr_lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+        cr_layout.addWidget(cr_lbl)
+        self._swatches: list[QPushButton] = []
+        for _ in range(6):
+            swatch = QPushButton()
+            swatch.setFixedSize(22, 22)
+            swatch.setFlat(True)
+            swatch.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._swatches.append(swatch)
+            cr_layout.addWidget(swatch)
+        cr_layout.addSpacing(4)
+        self._export_btn = QPushButton("Export")
+        self._export_btn.setFixedHeight(22)
+        self._export_btn.setFixedWidth(54)
+        self._export_btn.setStyleSheet("font-size: 10px;")
+        self._export_btn.clicked.connect(self._export_palette)
+        cr_layout.addWidget(self._export_btn)
+        cr_layout.addStretch()
+        self._colors_row.hide()
+        meta_layout.addWidget(self._colors_row)
 
         layout.addWidget(meta_frame)
         layout.addStretch()
@@ -246,6 +301,12 @@ class _PreviewPanel(QWidget):
 
         self._refresh_monitor_list()
 
+        # Extract color palette in background; hide stale swatches immediately.
+        self._current_palette = []
+        self._colors_row.hide()
+        if info.thumbnail_path and Path(info.thumbnail_path).exists():
+            self._start_palette_extraction(info.thumbnail_path)
+
     def refresh_monitors(self) -> None:
         """Re-query the Core Service for the current monitor list."""
         self._refresh_monitor_list()
@@ -274,6 +335,8 @@ class _PreviewPanel(QWidget):
         self._apply_btn.setEnabled(False)
         self._download_btn.hide()
         self._open_btn.hide()
+        self._colors_row.hide()
+        self._current_palette = []
 
     def _refresh_monitor_list(self) -> None:
         """Re-populate the monitor combo from the Core Service."""
@@ -298,6 +361,71 @@ class _PreviewPanel(QWidget):
         idx = self._monitor_combo.findText(current)
         if idx >= 0:
             self._monitor_combo.setCurrentIndex(idx)
+
+    # ------------------------------------------------------------------
+    # Palette helpers
+    # ------------------------------------------------------------------
+
+    def _start_palette_extraction(self, image_path: str) -> None:
+        self._palette_gen += 1
+        gen = self._palette_gen
+        worker = _PaletteWorker(image_path)
+        worker.palette_ready.connect(
+            lambda colors, g=gen: self._on_palette_ready(colors, g)
+        )
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        self._active_worker = worker
+
+    def _on_palette_ready(self, colors: list[str], gen: int) -> None:
+        if gen != self._palette_gen:
+            return  # stale result from a previously selected wallpaper
+        self._update_swatches(colors)
+
+    def _update_swatches(self, colors: list[str]) -> None:
+        if not colors:
+            self._colors_row.hide()
+            self._current_palette = []
+            return
+        self._current_palette = colors
+        for i, btn in enumerate(self._swatches):
+            if i < len(colors):
+                hex_c = colors[i]
+                btn.setStyleSheet(
+                    f"background-color: {hex_c};"
+                    "border: 1px solid rgba(255,255,255,0.15);"
+                    "border-radius: 3px;"
+                )
+                btn.setToolTip(hex_c)
+                try:
+                    btn.clicked.disconnect()
+                except RuntimeError:
+                    pass
+                btn.clicked.connect(lambda _checked=False, c=hex_c: self._copy_swatch(c))
+                btn.show()
+            else:
+                btn.hide()
+        self._colors_row.show()
+
+    def _copy_swatch(self, hex_color: str) -> None:
+        QApplication.clipboard().setText(hex_color)
+        QToolTip.showText(QCursor.pos(), f"Copied {hex_color}", self)
+
+    def _export_palette(self) -> None:
+        if not self._current_palette or not self._current_info:
+            return
+        QApplication.clipboard().setText("\n".join(self._current_palette))
+        cache_dir = Path.home() / ".cache" / "mural"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "current_palette.json").write_text(
+            json.dumps({
+                "colors": self._current_palette,
+                "wallpaper": self._current_info.path,
+            }, indent=2),
+            encoding="utf-8",
+        )
+        self._export_btn.setText("✓ Copied")
+        QTimer.singleShot(1500, lambda: self._export_btn.setText("Export"))
 
     def _on_apply(self) -> None:
         """Apply the current wallpaper to the selected monitor via D-Bus."""
