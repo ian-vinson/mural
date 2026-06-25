@@ -1,0 +1,43 @@
+# requirements-dev.txt — Mural development dependencies
+#
+# Includes all production dependencies plus tooling for testing,
+# formatting, linting, and type checking.
+#
+# Install with:
+#   pip install -r requirements-dev.txt
+
+# ── Production dependencies ───────────────────────────────────────────────
+-r requirements.txt
+
+# ── Testing ───────────────────────────────────────────────────────────────
+
+# Core test runner
+pytest>=7.4.0
+
+# Qt widget testing — mounts PySide6 widgets in headless test sessions
+pytest-qt>=4.2.0
+
+# Async test support (for platform API client tests)
+pytest-asyncio>=0.23.0
+
+# Subprocess and D-Bus mocking
+pytest-mock>=3.12.0
+
+# ── Code quality ──────────────────────────────────────────────────────────
+
+# Opinionated code formatter — run with: black mural/ tests/
+black>=23.0.0
+
+# Fast linter (replaces flake8 + isort) — run with: ruff check mural/ tests/
+ruff>=0.1.0
+
+# Static type checker — run with: mypy mural/
+mypy>=1.5.0
+
+# PySide6 type stubs for mypy
+PySide6-stubs>=6.6.0
+
+# ── Development utilities ─────────────────────────────────────────────────
+
+# Auto-reload on file change (useful when developing the platform API)
+watchfiles>=0.21.0

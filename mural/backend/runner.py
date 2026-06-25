@@ -1,0 +1,349 @@
+# mural/backend/runner.py
+#
+# Mural — Animated Wallpaper Platform for Linux
+# Copyright (C) 2024  Mural Contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+"""Subprocess wrapper for linux-wallpaperengine.
+
+Manages the lifetime of the ``linux-wallpaperengine`` (lwe) process:
+start, stop, restart on crash, and orphan cleanup on service restart.
+
+A single lwe process handles all monitors in one invocation:
+
+    linux-wallpaperengine \\
+        --screen-root DP-3   --bg /path/to/wallpaper1 \\
+        --screen-root HDMI-1 --bg /path/to/wallpaper2
+
+``BackendRunner`` owns that process and exposes a simple interface for
+the Core Service to drive it.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import signal
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+import psutil
+
+logger = logging.getLogger(__name__)
+
+_LWE_PROCESS_NAME = "linux-wallpaperengine"
+_SIGTERM_TIMEOUT = 3.0  # seconds to wait after SIGTERM before SIGKILL
+
+
+@dataclass
+class WallpaperAssignment:
+    """A single monitor-to-wallpaper mapping for lwe.
+
+    Attributes:
+        monitor: Output name as reported by the display server,
+            e.g. ``"DP-3"`` or ``"HDMI-A-2"``.
+        wallpaper: Absolute path to a wallpaper directory or file,
+            or a Wallpaper Engine workshop ID string.
+    """
+
+    monitor: str
+    wallpaper: str
+
+
+class BackendRunner:
+    """Manages the linux-wallpaperengine subprocess lifecycle.
+
+    One ``BackendRunner`` instance corresponds to one lwe process that
+    may serve multiple monitors simultaneously.  The runner spawns a
+    background monitor thread that detects unexpected process exits and
+    triggers an optional callback so the Core Service can decide whether
+    to restart.
+
+    Args:
+        binary_path: Absolute path to the ``linux-wallpaperengine`` binary.
+        assets_path: Path to the Wallpaper Engine assets directory
+            (``steamapps/common/wallpaper_engine``).  May be ``None``
+            when only non-scene wallpapers are used.
+        on_unexpected_exit: Optional callback invoked from the monitor
+            thread when lwe exits without being asked to.  Receives the
+            process return code as its sole argument.
+        auto_restart: If ``True``, automatically restart lwe when it
+            exits unexpectedly.  The callback (if any) is still called.
+        max_restarts: Maximum consecutive automatic restarts before
+            giving up.  Resets to zero after a successful run of at
+            least ``restart_grace_seconds``.
+        restart_grace_seconds: Seconds a process must run before its
+            restart counter is considered reset.
+    """
+
+    def __init__(
+        self,
+        binary_path: Path | str,
+        assets_path: Path | str | None = None,
+        on_unexpected_exit: Callable[[int], None] | None = None,
+        auto_restart: bool = True,
+        max_restarts: int = 5,
+        restart_grace_seconds: float = 10.0,
+    ) -> None:
+        self._binary = Path(binary_path)
+        self._assets = Path(assets_path) if assets_path else None
+        self._on_unexpected_exit = on_unexpected_exit
+        self._auto_restart = auto_restart
+        self._max_restarts = max_restarts
+        self._restart_grace = restart_grace_seconds
+
+        self._process: subprocess.Popen[bytes] | None = None
+        self._assignments: list[WallpaperAssignment] = []
+        self._monitor_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._restart_count = 0
+        self._start_time: float = 0.0
+        self._lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def start(self, assignments: list[WallpaperAssignment]) -> None:
+        """Start lwe with the given monitor-wallpaper assignments.
+
+        If a process is already running it is stopped first.
+
+        Args:
+            assignments: One or more :class:`WallpaperAssignment` items.
+
+        Raises:
+            FileNotFoundError: If the lwe binary does not exist.
+            ValueError: If ``assignments`` is empty.
+        """
+        if not assignments:
+            raise ValueError("At least one WallpaperAssignment is required")
+        if not self._binary.exists():
+            raise FileNotFoundError(f"lwe binary not found: {self._binary}")
+
+        with self._lock:
+            if self._process and self._process.poll() is None:
+                logger.debug("Stopping existing lwe process before restart")
+                self._stop_process()
+
+            self._assignments = list(assignments)
+            self._stop_event.clear()
+            self._start_process()
+
+    def stop(self) -> None:
+        """Stop the lwe process gracefully and join the monitor thread."""
+        with self._lock:
+            self._stop_event.set()
+            self._auto_restart = False  # prevent auto-restart on this stop
+            self._stop_process()
+
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=5.0)
+
+    def restart(self) -> None:
+        """Restart lwe with the current assignments."""
+        with self._lock:
+            self._stop_process()
+            self._stop_event.clear()
+            self._start_process()
+
+    def is_running(self) -> bool:
+        """Return ``True`` if lwe is currently running."""
+        with self._lock:
+            return self._process is not None and self._process.poll() is None
+
+    @property
+    def pid(self) -> int | None:
+        """PID of the running lwe process, or ``None``."""
+        if self._process:
+            return self._process.pid
+        return None
+
+    # ------------------------------------------------------------------
+    # Process lifecycle (called with _lock held)
+    # ------------------------------------------------------------------
+
+    def _build_command(self, assignments: list[WallpaperAssignment]) -> list[str]:
+        """Build the lwe CLI command for the given assignments."""
+        cmd: list[str] = [str(self._binary)]
+
+        if self._assets:
+            cmd += ["--assets-dir", str(self._assets)]
+
+        for assignment in assignments:
+            cmd += ["--screen-root", assignment.monitor, "--bg", assignment.wallpaper]
+
+        return cmd
+
+    def _start_process(self) -> None:
+        """Spawn the lwe subprocess in its own process group."""
+        cmd = self._build_command(self._assignments)
+        logger.info("Starting lwe: %s", " ".join(cmd))
+
+        self._process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid,  # new process group → clean kill
+        )
+        self._start_time = time.monotonic()
+        logger.info("lwe started (pid=%d)", self._process.pid)
+
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_process,
+            name="lwe-monitor",
+            daemon=True,
+        )
+        self._monitor_thread.start()
+
+    def _stop_process(self) -> None:
+        """Send SIGTERM to the process group; escalate to SIGKILL after timeout."""
+        if not self._process:
+            return
+        if self._process.poll() is not None:
+            self._process = None
+            return
+
+        pid = self._process.pid
+        try:
+            pgid = os.getpgid(pid)
+            logger.debug("Sending SIGTERM to process group %d", pgid)
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+        try:
+            self._process.wait(timeout=_SIGTERM_TIMEOUT)
+            logger.debug("lwe exited cleanly after SIGTERM")
+        except subprocess.TimeoutExpired:
+            logger.warning("lwe did not exit after SIGTERM; sending SIGKILL")
+            try:
+                pgid = os.getpgid(pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self._process.wait()
+
+        self._process = None
+
+    # ------------------------------------------------------------------
+    # Background monitor thread
+    # ------------------------------------------------------------------
+
+    def _monitor_process(self) -> None:
+        """Watch the lwe process and handle unexpected exits.
+
+        Runs in a daemon thread.  Exits when the stop event is set or
+        the process exits after ``stop()`` was called.
+        """
+        process = self._process
+        if not process:
+            return
+
+        returncode = process.wait()
+
+        if self._stop_event.is_set():
+            # Clean shutdown — nothing to do.
+            return
+
+        logger.warning("lwe exited unexpectedly (returncode=%d)", returncode)
+
+        if self._on_unexpected_exit:
+            try:
+                self._on_unexpected_exit(returncode)
+            except Exception:
+                logger.exception("on_unexpected_exit callback raised")
+
+        uptime = time.monotonic() - self._start_time
+        if uptime >= self._restart_grace:
+            self._restart_count = 0
+
+        if self._auto_restart and self._restart_count < self._max_restarts:
+            self._restart_count += 1
+            backoff = min(2 ** (self._restart_count - 1), 30)
+            logger.info(
+                "Auto-restarting lwe in %.0fs (attempt %d/%d)",
+                backoff,
+                self._restart_count,
+                self._max_restarts,
+            )
+            time.sleep(backoff)
+            with self._lock:
+                if not self._stop_event.is_set():
+                    self._start_process()
+        else:
+            logger.error(
+                "lwe exited and will not be restarted (max_restarts=%d reached or auto_restart=False)",
+                self._max_restarts,
+            )
+
+    # ------------------------------------------------------------------
+    # Orphan cleanup
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def kill_orphans() -> int:
+        """Kill any lwe processes not owned by this runner.
+
+        Scans ``/proc`` via psutil for processes named
+        ``linux-wallpaperengine`` and terminates them.  Called at service
+        startup to clean up after a previous crash.
+
+        Returns:
+            Number of orphaned processes killed.
+        """
+        killed = 0
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                name = proc.info.get("name") or ""
+                cmdline = proc.info.get("cmdline") or []
+                is_lwe = name == _LWE_PROCESS_NAME or any(
+                    _LWE_PROCESS_NAME in str(arg) for arg in cmdline
+                )
+                if is_lwe:
+                    logger.warning(
+                        "Killing orphaned lwe process (pid=%d)", proc.pid
+                    )
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3.0)
+                    except psutil.TimeoutExpired:
+                        proc.kill()
+                    killed += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        if killed:
+            logger.info("Killed %d orphaned lwe process(es)", killed)
+        return killed
+
+    # ------------------------------------------------------------------
+    # Context manager support
+    # ------------------------------------------------------------------
+
+    def __enter__(self) -> "BackendRunner":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.stop()
+
+    def __repr__(self) -> str:
+        state = "running" if self.is_running() else "stopped"
+        return f"<BackendRunner binary={self._binary.name!r} state={state} pid={self.pid}>"

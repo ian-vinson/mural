@@ -1,0 +1,22 @@
+{
+  "KPlugin": {
+    "Id": "com.mural.wallpaper",
+    "Name": "Mural",
+    "Description": "Animated wallpapers via Mural — video, scene, and web-based",
+    "Icon": "video-display",
+    "Version": "0.1.0",
+    "Website": "https://github.com/ian-vinson/mural",
+    "BugReportUrl": "https://github.com/ian-vinson/mural/issues",
+    "License": "GPL-3.0-or-later",
+    "Authors": [
+      {
+        "Name": "Mural Contributors",
+        "Email": ""
+      }
+    ],
+    "Category": "Wallpaper"
+  },
+  "X-Plasma-API-Minimum-Version": "6.0",
+  "X-KDE-ServiceTypes": ["Plasma/Wallpaper"],
+  "X-KDE-PluginInfo-Name": "com.mural.wallpaper"
+}

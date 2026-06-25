@@ -1,0 +1,88 @@
+# systemd/mural-core.service
+#
+# Mural Core animated wallpaper session service
+#
+# Install:  cp systemd/mural-core.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload
+#           systemctl --user enable --now mural-core.service
+#
+# Or via install.sh which does this automatically.
+
+[Unit]
+Description=Mural Animated Wallpaper Service
+Documentation=https://github.com/ian-vinson/mural
+
+# Must come up after the graphical session is established so that
+# linux-wallpaperengine can find the display.  graphical-session.target
+# is set by the session manager (KWin, Mutter, etc.) once the display
+# server and compositor are ready.
+After=graphical-session.target
+
+# On KDE Plasma, also wait for plasmashell so the desktop is fully
+# ready before we render into it.  If this unit does not exist (non-KDE
+# systems) systemd silently ignores the ordering constraint.
+After=plasma-plasmashell.service
+
+# Mural is part of the graphical session — stop when the session ends.
+PartOf=graphical-session.target
+
+# Soft dependency: start plasma-plasmashell if it is available and not
+# yet running, but do not fail if it does not exist.
+Wants=plasma-plasmashell.service
+
+[Service]
+Type=simple
+
+# Absolute install path.  The AUR PKGBUILD installs the entry point here.
+# For manual/venv installs, symlink or adjust this path.
+ExecStart=/usr/bin/mural-core
+
+# -----------------------------------------------------------------------
+# D-Bus session bus (hard problem #4 from DEVGUIDE)
+#
+# systemd user services do not automatically inherit DBUS_SESSION_BUS_ADDRESS
+# from the graphical session.  Set it explicitly using the numeric UID
+# specifier %U so that dasbus can reach the session bus.
+# -----------------------------------------------------------------------
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+
+# Ensure DISPLAY and WAYLAND_DISPLAY are forwarded from the session
+# environment when set via `systemctl --user import-environment`.
+# These are needed by linux-wallpaperengine.
+PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR
+
+# -----------------------------------------------------------------------
+# Process management
+#
+# KillMode=control-group ensures that linux-wallpaperengine (a child
+# process of mural-core) is also killed when the service stops, rather
+# than becoming an orphan.  BackendRunner also sends SIGTERM to the
+# process group on clean shutdown, but this is the safety net.
+# -----------------------------------------------------------------------
+KillMode=control-group
+KillSignal=SIGTERM
+
+# Give the service time to flush state and stop lwe cleanly before
+# systemd escalates to SIGKILL.
+TimeoutStopSec=8
+
+# Restart on failure but not on clean exit (e.g. explicit systemctl stop).
+Restart=on-failure
+RestartSec=3
+
+# Cap restart attempts to avoid thrashing if lwe is not installed.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Route stdout/stderr to the systemd journal.  View with:
+#   journalctl --user -u mural-core.service -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mural-core
+
+# Run in the app slice so resource limits apply correctly alongside
+# other graphical user applications.
+Slice=app.slice
+
+[Install]
+WantedBy=graphical-session.target

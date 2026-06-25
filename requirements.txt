@@ -1,0 +1,32 @@
+# requirements.txt — Mural production dependencies
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# ── System prerequisites (install via package manager, not pip) ──────────
+#
+# Arch / CachyOS / Manjaro:
+#   sudo pacman -S python-gobject gobject-introspection glib2
+#
+# These provide the `gi` (PyGObject) bindings used by dasbus to drive
+# the GLib main loop and D-Bus session bus.  They cannot be installed
+# reliably via pip on Linux because they depend on compiled system libs.
+# ─────────────────────────────────────────────────────────────────────────
+
+# GUI framework
+PySide6>=6.6.0
+
+# D-Bus IPC — requires PyGObject (system package, see above)
+dasbus>=1.7
+
+# HTTP client for Mural content platform API
+requests>=2.31.0
+
+# Image processing — thumbnail generation and preview scaling
+Pillow>=10.0.0
+
+# Process management — lwe subprocess monitoring and orphan cleanup
+psutil>=5.9.0
+
+# File system watching — library directory change detection
+watchdog>=3.0.0
