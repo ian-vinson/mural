@@ -116,6 +116,7 @@ class BackendRunner:
         self._restart_count = 0
         self._start_time: float = 0.0
         self._lock = threading.Lock()
+        self._intentional_stop: bool = False
 
     # ------------------------------------------------------------------
     # Public interface
@@ -138,21 +139,26 @@ class BackendRunner:
         if not self._binary.exists():
             raise FileNotFoundError(f"lwe binary not found: {self._binary}")
 
+        self.kill_orphans()
+
         with self._lock:
             if self._process and self._process.poll() is None:
                 logger.debug("Stopping existing lwe process before restart")
+                self._intentional_stop = True
                 self._stop_process()
 
             self._assignments = list(assignments)
             self._stop_event.clear()
+            self._intentional_stop = False
             self._start_process()
 
     def stop(self) -> None:
         """Stop the lwe process gracefully and join the monitor thread."""
         with self._lock:
+            self._intentional_stop = True
             self._stop_event.set()
-            self._auto_restart = False  # prevent auto-restart on this stop
             self._stop_process()
+            self._restart_count = 0
 
         if self._monitor_thread and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=5.0)
@@ -160,8 +166,10 @@ class BackendRunner:
     def restart(self) -> None:
         """Restart lwe with the current assignments."""
         with self._lock:
+            self._intentional_stop = True
             self._stop_process()
             self._stop_event.clear()
+            self._intentional_stop = False
             self._start_process()
 
     def is_running(self) -> bool:
@@ -228,6 +236,35 @@ class BackendRunner:
             elif env.get("DISPLAY"):
                 env["XDG_SESSION_TYPE"] = "x11"
                 logger.debug("lwe env: inferred XDG_SESSION_TYPE=x11 from DISPLAY")
+
+        # Hard guard: kill any lwe process owned by this user before spawning.
+        # Catches processes that slipped past stop() or the orphan cleanup,
+        # preventing multiple simultaneous lwe instances.
+        current_uid = os.getuid()
+        for proc in psutil.process_iter(["pid", "name", "uids", "cmdline"]):
+            try:
+                name = proc.info.get("name") or ""
+                cmdline = proc.info.get("cmdline") or []
+                uids = proc.info.get("uids")
+                is_lwe = name == _LWE_PROCESS_NAME or any(
+                    _LWE_PROCESS_NAME in str(arg) for arg in cmdline
+                )
+                if is_lwe and uids and uids.real == current_uid:
+                    logger.warning("Pre-spawn guard: killing lwe (pid=%d)", proc.pid)
+                    try:
+                        pgid = os.getpgid(proc.pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        try:
+                            proc.kill()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    try:
+                        proc.wait(timeout=2.0)
+                    except psutil.TimeoutExpired:
+                        pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
 
         self._process = subprocess.Popen(
             cmd,
@@ -302,8 +339,13 @@ class BackendRunner:
             except Exception:
                 pass
 
+        # Intentional stop (stop()/start()/restart() killed lwe) or clean
+        # exit (lwe exits 0 on SIGTERM) — no auto-restart in either case.
+        if self._intentional_stop or returncode == 0:
+            self._intentional_stop = False
+            return
+
         if self._stop_event.is_set():
-            # Clean shutdown — nothing to do.
             return
 
         logger.warning("lwe exited unexpectedly (returncode=%d)", returncode)
@@ -327,7 +369,8 @@ class BackendRunner:
                 self._restart_count,
                 self._max_restarts,
             )
-            time.sleep(backoff)
+            # Interruptible sleep: stop()/start() sets _stop_event to wake us early.
+            self._stop_event.wait(timeout=backoff)
             with self._lock:
                 if not self._stop_event.is_set():
                     self._start_process()
