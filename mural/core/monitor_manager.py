@@ -96,6 +96,7 @@ class MonitorAssignment:
     monitor_name: str
     wallpaper: str = ""
     enabled: bool = True
+    scaling: str = "default"
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +426,7 @@ class MonitorManager:
                 monitor_name=name,
                 wallpaper=entry.get("wallpaper", ""),
                 enabled=entry.get("enabled", True),
+                scaling=entry.get("scaling", "default"),
             )
             for name, entry in raw.items()
         }
@@ -434,7 +436,7 @@ class MonitorManager:
         """Persist current assignments to ``~/.config/mural/monitors.json``."""
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
-            name: {"wallpaper": a.wallpaper, "enabled": a.enabled}
+            name: {"wallpaper": a.wallpaper, "enabled": a.enabled, "scaling": a.scaling}
             for name, a in self._assignments.items()
         }
         try:
@@ -456,6 +458,13 @@ class MonitorManager:
         if monitor_name not in self._assignments:
             self._assignments[monitor_name] = MonitorAssignment(monitor_name=monitor_name)
         self._assignments[monitor_name].wallpaper = wallpaper
+        self.save_assignments()
+
+    def assign_scaling(self, monitor_name: str, scaling: str) -> None:
+        """Set the scaling mode for a monitor and persist immediately."""
+        if monitor_name not in self._assignments:
+            self._assignments[monitor_name] = MonitorAssignment(monitor_name=monitor_name)
+        self._assignments[monitor_name].scaling = scaling
         self.save_assignments()
 
     def set_enabled(self, monitor_name: str, enabled: bool) -> None:

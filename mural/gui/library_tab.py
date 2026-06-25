@@ -433,6 +433,8 @@ class LibraryTab(QWidget):
         self._tag_buttons: dict[str, QPushButton] = {}
         self._scan_worker: _LibraryScanWorker | None = None
         self._extra_dirs: list[Path] = []
+        self._scanning: bool = False
+        self._seen_paths: set[str] = set()
 
         self._build_ui()
         self._start_scan()
@@ -544,7 +546,15 @@ class LibraryTab(QWidget):
 
     def _start_scan(self) -> None:
         """Begin a background scan of default + user-added directories."""
-        dirs = list(_detect_steam_workshop_paths()) + self._extra_dirs
+        if self._scanning:
+            return
+        seen_dirs: set[str] = set()
+        dirs: list[Path] = []
+        for d in list(_detect_steam_workshop_paths()) + self._extra_dirs:
+            key = str(d)
+            if key not in seen_dirs:
+                seen_dirs.add(key)
+                dirs.append(d)
         if not dirs:
             self._status_label.setText(
                 "No wallpaper directories found. Click '+ Add Folder' to add one."
@@ -564,6 +574,8 @@ class LibraryTab(QWidget):
         self._tag_buttons.clear()
         self._tag_row_widget.hide()
         self._clear_btn.hide()
+        self._seen_paths.clear()
+        self._scanning = True
 
         self._progress.show()
         self._status_label.setText("Scanning…")
@@ -578,12 +590,16 @@ class LibraryTab(QWidget):
 
     def _on_wallpaper_found(self, info: WallpaperInfo) -> None:
         """Add a discovered wallpaper to the grid (called from main thread via signal)."""
+        if info.path in self._seen_paths:
+            return
+        self._seen_paths.add(info.path)
         self._all_infos.append(info)
         if self._matches_filter(info):
             self._add_card(info)
 
     def _on_scan_complete(self, total: int) -> None:
         """Hide the progress bar, rebuild tag chips, and update the status label."""
+        self._scanning = False
         self._progress.hide()
         self._rebuild_tag_row()
         self._update_status()

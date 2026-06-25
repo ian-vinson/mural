@@ -78,8 +78,8 @@ class IMuralCore:
     lives in :class:`MuralCoreService`.
     """
 
-    def SetWallpaper(self, monitor: Str, path: Str) -> Bool:
-        """Apply a wallpaper to a named monitor."""
+    def SetWallpaper(self, monitor: Str, path: Str, scaling: Str) -> Bool:
+        """Apply a wallpaper to a named monitor with optional scaling mode."""
         ...
 
     def GetCurrentWallpaper(self, monitor: Str) -> Str:
@@ -285,8 +285,8 @@ class MuralCoreService(IMuralCore):
     # Core D-Bus methods
     # ------------------------------------------------------------------
 
-    def SetWallpaper(self, monitor: str, path: str) -> bool:  # type: ignore[override]
-        logger.info("SetWallpaper(%r, %r)", monitor, path)
+    def SetWallpaper(self, monitor: str, path: str, scaling: str = "default") -> bool:  # type: ignore[override]
+        logger.info("SetWallpaper(%r, %r, scaling=%r)", monitor, path, scaling)
 
         if not self._runner:
             logger.error("SetWallpaper: lwe binary not found")
@@ -297,9 +297,16 @@ class MuralCoreService(IMuralCore):
             return False
 
         self._monitor_manager.assign_wallpaper(monitor, path)
+        self._monitor_manager.assign_scaling(monitor, scaling)
         result = self._apply_all()
-        if result and bool(_cfg.get("pywal_on_change", False)):
-            self._run_pywal_async(path)
+        if result:
+            pywal_source = str(_cfg.get("pywal_source", "disabled"))
+            if pywal_source == "last":
+                self._run_pywal_async(path)
+            elif pywal_source == "primary":
+                primary = self._monitor_manager.primary_monitor()
+                if primary is None or monitor == primary.name:
+                    self._run_pywal_async(path)
         return result
 
     def GetCurrentWallpaper(self, monitor: str) -> str:  # type: ignore[override]
@@ -509,7 +516,7 @@ class MuralCoreService(IMuralCore):
             return True
 
         assignments = [
-            WallpaperAssignment(monitor=a.monitor_name, wallpaper=a.wallpaper)
+            WallpaperAssignment(monitor=a.monitor_name, wallpaper=a.wallpaper, scaling=a.scaling)
             for a in active
         ]
         try:

@@ -91,8 +91,8 @@ from mural.gui.wallpaper_card import WallpaperInfo
 _PREVIEW_MIN_W = 280
 _PREVIEW_MAX_W = 380
 _THUMB_MAX_H   = 200
-_WIN_MIN_W     = 920
-_WIN_MIN_H     = 580
+_WIN_MIN_W     = 1100
+_WIN_MIN_H     = 680
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +247,17 @@ class _PreviewPanel(QWidget):
         )
         monitor_row.addWidget(self._monitor_combo, 1)
         layout.addLayout(monitor_row)
+
+        scaling_row = QHBoxLayout()
+        scaling_row.addWidget(QLabel("Scaling:"))
+        self._scaling_combo = QComboBox()
+        self._scaling_combo.setFixedHeight(28)
+        self._scaling_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._scaling_combo.addItems(["default", "stretch", "fit", "fill"])
+        scaling_row.addWidget(self._scaling_combo, 1)
+        layout.addLayout(scaling_row)
 
         # Action buttons
         self._apply_btn = QPushButton("Set as Wallpaper")
@@ -626,7 +637,7 @@ class _PreviewPanel(QWidget):
         for monitor in monitors:
             try:
                 if self._core.GetCurrentWallpaper(monitor) == path:
-                    self._core.SetWallpaper(monitor, path)
+                    self._core.SetWallpaper(monitor, path, "default")
             except Exception:
                 pass
 
@@ -722,8 +733,9 @@ class _PreviewPanel(QWidget):
             )
             return
 
+        scaling = self._scaling_combo.currentText()
         try:
-            ok = self._core.SetWallpaper(monitor, self._current_info.path)
+            ok = self._core.SetWallpaper(monitor, self._current_info.path, scaling)
             if not ok:
                 QMessageBox.warning(self, "Apply Failed",
                                     "The Core Service could not apply the wallpaper.\n"
@@ -804,7 +816,14 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("Mural")
         self.setMinimumSize(_WIN_MIN_W, _WIN_MIN_H)
-        self.resize(1200, 700)
+        self.resize(1400, 860)
+        screen = QApplication.primaryScreen()
+        if screen:
+            geo = screen.geometry()
+            self.move(
+                geo.x() + (geo.width() - self.width()) // 2,
+                geo.y() + (geo.height() - self.height()) // 2,
+            )
 
         self._build_ui()
         self._build_menu()
@@ -1027,7 +1046,7 @@ class MainWindow(QMainWindow):
             return
         if monitors:
             try:
-                self._core.SetWallpaper(monitors[0], info.path)
+                self._core.SetWallpaper(monitors[0], info.path, "default")
                 self.statusBar().showMessage(
                     f"Applied '{info.name}' to {monitors[0]}", 4000
                 )

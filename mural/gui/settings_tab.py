@@ -97,7 +97,7 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "autostart": True,
     "playlist_interval_minutes": 0,   # 0 = disabled
     "monitor_assignments": {},
-    "pywal_on_change": False,
+    "pywal_source": "disabled",
     "pause_app_list": [],
     "time_schedule_enabled": False,
     "time_schedule": [
@@ -821,21 +821,48 @@ class SettingsTab(QWidget):
         form.setHorizontalSpacing(16)
         form.setVerticalSpacing(10)
 
-        self._pywal_chk = QCheckBox(
-            "Apply pywal color scheme on wallpaper change"
-        )
-        form.addRow("Pywal:", self._pywal_chk)
+        self._pywal_source_combo = QComboBox()
+        self._pywal_source_combo.addItem("Disabled", userData="disabled")
+        self._pywal_source_combo.addItem("Primary monitor only", userData="primary")
+        self._pywal_source_combo.addItem("Any monitor change", userData="last")
+        form.addRow("Pywal source:", self._pywal_source_combo)
 
-        self._pywal_status_label = QLabel()
+        pywal_status = QLabel()
         if shutil.which("wal"):
-            self._pywal_status_label.setText("pywal detected")
-            self._pywal_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+            pywal_status.setText("pywal detected")
+            pywal_status.setStyleSheet("font-size: 11px; color: #00C853;")
         else:
-            self._pywal_status_label.setText(
-                "pywal not found — install python-pywal"
-            )
-            self._pywal_status_label.setStyleSheet("font-size: 11px; color: #888;")
-        form.addRow("", self._pywal_status_label)
+            pywal_status.setText("pywal not found — install python-pywal")
+            pywal_status.setStyleSheet("font-size: 11px; color: #888;")
+        form.addRow("", pywal_status)
+
+        setup_toggle = QPushButton("▶ Setup guide")
+        setup_toggle.setFlat(True)
+        setup_toggle.setStyleSheet(
+            "QPushButton { font-size: 11px; color: #aaa; text-align: left;"
+            " padding: 0; border: none; background: transparent; }"
+            "QPushButton:hover { color: #ddd; }"
+        )
+        setup_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self._pywal_guide = QLabel(
+            "1. Install pywal: <tt>pip install pywal</tt><br>"
+            "2. Run once to generate a scheme: <tt>wal -i /path/to/image.jpg</tt><br>"
+            "3. Add <tt>~/.config/wpg/formats/colors.sh</tt> to your shell profile.<br>"
+            "4. Set Pywal source above and apply a wallpaper — Mural will call <tt>wal</tt> automatically."
+        )
+        self._pywal_guide.setWordWrap(True)
+        self._pywal_guide.setStyleSheet("font-size: 11px; color: #888; padding-left: 8px;")
+        self._pywal_guide.hide()
+
+        def _toggle_guide() -> None:
+            visible = not self._pywal_guide.isVisible()
+            self._pywal_guide.setVisible(visible)
+            setup_toggle.setText(("▼" if visible else "▶") + " Setup guide")
+
+        setup_toggle.clicked.connect(_toggle_guide)
+        form.addRow("", setup_toggle)
+        form.addRow("", self._pywal_guide)
 
         return box
 
@@ -988,7 +1015,9 @@ class SettingsTab(QWidget):
         self._disable_parallax_chk.setChecked(s.get("disable_parallax", False))
         self._autostart_chk.setChecked(s.get("autostart", True))
         self._playlist_spin.setValue(s.get("playlist_interval_minutes", 0))
-        self._pywal_chk.setChecked(s.get("pywal_on_change", False))
+        pywal_source = s.get("pywal_source", "disabled")
+        idx = self._pywal_source_combo.findData(pywal_source)
+        self._pywal_source_combo.setCurrentIndex(max(idx, 0))
         self._app_list_edit.setPlainText(
             "\n".join(s.get("pause_app_list", []))
         )
@@ -1047,7 +1076,7 @@ class SettingsTab(QWidget):
             "autostart": self._autostart_chk.isChecked(),
             "playlist_interval_minutes": self._playlist_spin.value(),
             "monitor_assignments": self._collect_monitor_assignments(),
-            "pywal_on_change": self._pywal_chk.isChecked(),
+            "pywal_source": self._pywal_source_combo.currentData(),
             "pause_app_list": pause_app_list,
             "time_schedule_enabled": self._sched_enabled_chk.isChecked(),
             "time_schedule": schedule,

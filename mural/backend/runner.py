@@ -88,6 +88,7 @@ class WallpaperAssignment:
 
     monitor: str
     wallpaper: str
+    scaling: str = "default"
 
 
 class BackendRunner:
@@ -279,6 +280,8 @@ class BackendRunner:
             cmd.append("--disable-parallax")
 
         for assignment in assignments:
+            if assignment.scaling and assignment.scaling != "default":
+                cmd += ["--scaling", assignment.scaling]
             cmd += ["--screen-root", assignment.monitor, "--bg", assignment.wallpaper]
 
         for assignment in assignments:
