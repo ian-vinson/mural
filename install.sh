@@ -6,67 +6,66 @@
 # GPL v3 — see LICENSE
 #
 # Usage:
-#   ./install.sh          # install to ~/.local (user-only, no sudo needed)
-#   ./install.sh --system # install to /usr (requires sudo)
+#   ./install.sh
+#
+# Installs to ~/.local/bin with a self-contained venv at
+# ~/.local/share/mural/venv — no sudo required.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PREFIX="${HOME}/.local"
-SYSTEM_INSTALL=0
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 for arg in "$@"; do
   case "$arg" in
-    --system) SYSTEM_INSTALL=1; PREFIX="/usr" ;;
-    --prefix=*) PREFIX="${arg#--prefix=}" ;;
     --help|-h)
-      echo "Usage: $0 [--system] [--prefix=PATH]"
-      echo "  --system        Install to /usr (requires sudo)"
-      echo "  --prefix=PATH   Install to PATH (default: ~/.local)"
+      echo "Usage: $0"
+      echo "  Installs Mural to ~/.local/bin with a venv at ~/.local/share/mural/venv"
       exit 0 ;;
   esac
 done
 
-BIN_DIR="${PREFIX}/bin"
-LIB_DIR="${PREFIX}/lib/python3/dist-packages"
-SHARE_DIR="${PREFIX}/share/mural"
+BIN_DIR="${HOME}/.local/bin"
+VENV_DIR="${HOME}/.local/share/mural/venv"
 PLASMA_PLUGIN_DIR="${HOME}/.local/share/plasma/wallpapers/com.mural.wallpaper"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 
-echo "Installing Mural to ${PREFIX} ..."
+echo "Installing Mural ..."
+
+# ---------------------------------------------------------------------------
+# Virtual environment
+# ---------------------------------------------------------------------------
+echo "[1/6] Creating virtual environment at ${VENV_DIR} ..."
+mkdir -p "${HOME}/.local/share/mural"
+python3 -m venv "${VENV_DIR}"
+VENV_PIP="${VENV_DIR}/bin/pip"
+VENV_PYTHON="${VENV_DIR}/bin/python"
 
 # ---------------------------------------------------------------------------
 # Python dependencies
 # ---------------------------------------------------------------------------
-echo "[1/6] Installing Python dependencies..."
-pip install --quiet -r "${SCRIPT_DIR}/requirements.txt"
-
-# ---------------------------------------------------------------------------
-# Python package
-# ---------------------------------------------------------------------------
-echo "[2/6] Installing mural Python package..."
-pip install --quiet -e "${SCRIPT_DIR}"
+echo "[2/6] Installing Python dependencies into venv..."
+"${VENV_PIP}" install --quiet --upgrade pip
+"${VENV_PIP}" install --quiet -r "${SCRIPT_DIR}/requirements.txt"
+"${VENV_PIP}" install --quiet -e "${SCRIPT_DIR}"
 
 # ---------------------------------------------------------------------------
 # Entry point scripts
 # ---------------------------------------------------------------------------
-echo "[3/6] Installing entry point scripts..."
+echo "[3/6] Installing entry point scripts to ${BIN_DIR} ..."
 mkdir -p "${BIN_DIR}"
 
-cat > "${BIN_DIR}/mural" << 'EOF'
-#!/usr/bin/env python3
-from mural.main import main
-main()
+cat > "${BIN_DIR}/mural" << EOF
+#!/usr/bin/env bash
+exec "${VENV_PYTHON}" -m mural.main "\$@"
 EOF
 chmod +x "${BIN_DIR}/mural"
 
-cat > "${BIN_DIR}/mural-core" << 'EOF'
-#!/usr/bin/env python3
-from mural.core.service import main
-main()
+cat > "${BIN_DIR}/mural-core" << EOF
+#!/usr/bin/env bash
+exec "${VENV_PYTHON}" -m mural.core.service "\$@"
 EOF
 chmod +x "${BIN_DIR}/mural-core"
 
@@ -92,7 +91,7 @@ systemctl --user enable --now mural-core.service && \
 # ---------------------------------------------------------------------------
 # Config directory
 # ---------------------------------------------------------------------------
-echo "[6/6] Creating config directory..."
+echo "[6/6] Creating config and data directories..."
 mkdir -p "${HOME}/.config/mural"
 mkdir -p "${HOME}/.local/share/mural/downloads"
 mkdir -p "${HOME}/.cache/mural"
@@ -108,5 +107,5 @@ echo "Service status:          systemctl --user status mural-core.service"
 echo "Service logs:            journalctl --user -u mural-core.service -f"
 echo ""
 echo "To uninstall:            systemctl --user disable --now mural-core.service"
-echo "                         rm -rf ${PLASMA_PLUGIN_DIR}"
+echo "                         rm -rf ${VENV_DIR} ${PLASMA_PLUGIN_DIR}"
 echo "                         rm ${BIN_DIR}/mural ${BIN_DIR}/mural-core"
