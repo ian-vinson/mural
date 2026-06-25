@@ -49,7 +49,11 @@ VENV_PYTHON="${VENV_DIR}/bin/python"
 echo "[2/6] Installing Python dependencies into venv..."
 "${VENV_PIP}" install --quiet --upgrade pip
 "${VENV_PIP}" install --quiet -r "${SCRIPT_DIR}/requirements.txt"
-"${VENV_PIP}" install --quiet -e "${SCRIPT_DIR}"
+
+# Add the project root to the venv's sys.path via a .pth file so the
+# mural package is importable without a build step.
+SITE_PACKAGES=$("${VENV_PYTHON}" -c "import site; print(site.getsitepackages()[0])")
+echo "${SCRIPT_DIR}" > "${SITE_PACKAGES}/mural.pth"
 
 # ---------------------------------------------------------------------------
 # Entry point scripts
