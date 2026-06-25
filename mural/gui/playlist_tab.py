@@ -262,8 +262,9 @@ class PlaylistTab(QWidget):
         if self._core:
             try:
                 self._playlists = json.loads(self._core.GetPlaylists())
-            except Exception:
-                pass
+                self._status_label.setText("")
+            except Exception as exc:
+                self._status_label.setText(f"GetPlaylists error: {exc}")
             try:
                 self._monitor_names = list(self._core.GetMonitors())
             except Exception:
@@ -511,7 +512,8 @@ class PlaylistTab(QWidget):
             return
         try:
             ok = self._core.AddToPlaylist(self._selected_id, path)
-        except Exception:
+        except Exception as exc:
+            self._status_label.setText(f"AddToPlaylist error: {exc}")
             return
         if ok:
             self._add_wp_item(path)
