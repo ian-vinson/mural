@@ -33,9 +33,7 @@ Wants=plasma-plasmashell.service
 [Service]
 Type=simple
 
-# Absolute install path.  The AUR PKGBUILD installs the entry point here.
-# For manual/venv installs, symlink or adjust this path.
-ExecStart=/usr/bin/mural-core
+ExecStart=%h/.local/bin/mural-core
 
 # -----------------------------------------------------------------------
 # D-Bus session bus (hard problem #4 from DEVGUIDE)
