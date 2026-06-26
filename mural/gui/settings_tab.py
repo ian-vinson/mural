@@ -120,6 +120,12 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "playlist_interval_minutes": 0,
     "monitor_assignments": {},
     "pywal_source": "disabled",
+    "show_now_playing": True,
+    "mpris_to_wallpaper": False,
+    "openrgb_sync": False,
+    "openrgb_color_source": "dominant",
+    "screensaver_enabled": False,
+    "screensaver_timeout_minutes": 5,
     "pause_app_list": [],
     "time_schedule_enabled": False,
     "time_schedule": [
@@ -357,6 +363,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_performance_section())
         layout.addWidget(self._build_playlist_section())
         layout.addWidget(self._build_schedule_section())
+        layout.addWidget(self._build_screensaver_section())
         layout.addWidget(self._build_linux_integration_section())
         layout.addWidget(self._build_app_rules_section())
         layout.addWidget(self._build_library_section())
@@ -1012,7 +1019,248 @@ class SettingsTab(QWidget):
         form.addRow("", setup_toggle)
         form.addRow("", self._pywal_guide)
 
+        # MPRIS now playing
+        form.addRow(QLabel(""))  # spacer
+        mpris_header = QLabel("<b>MPRIS Now Playing</b>")
+        mpris_header.setStyleSheet("font-size: 12px; color: #ccc;")
+        form.addRow("", mpris_header)
+
+        self._show_now_playing_chk = QCheckBox("Show now playing info in preview panel")
+        form.addRow("", self._show_now_playing_chk)
+
+        self._mpris_to_wallpaper_chk = QCheckBox(
+            "Pass media metadata to wallpaper properties"
+        )
+        form.addRow("", self._mpris_to_wallpaper_chk)
+
+        mpris_note = QLabel(
+            "Requires the wallpaper to define mediametadata_title / mediametadata_artist properties."
+        )
+        mpris_note.setWordWrap(True)
+        mpris_note.setStyleSheet("font-size: 11px; color: #666; padding-left: 8px;")
+        form.addRow("", mpris_note)
+
+        # OpenRGB sync
+        form.addRow(QLabel(""))  # spacer
+        rgb_header = QLabel("<b>OpenRGB Sync</b>")
+        rgb_header.setStyleSheet("font-size: 12px; color: #ccc;")
+        form.addRow("", rgb_header)
+
+        self._openrgb_sync_chk = QCheckBox("Sync RGB lighting to wallpaper colors")
+        form.addRow("", self._openrgb_sync_chk)
+
+        self._openrgb_status_label = QLabel()
+        self._openrgb_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        form.addRow("Status:", self._openrgb_status_label)
+
+        self._openrgb_color_source_combo = QComboBox()
+        self._openrgb_color_source_combo.addItems(["dominant", "secondary", "tertiary", "average"])
+        form.addRow("Color source:", self._openrgb_color_source_combo)
+
+        test_rgb_btn = QPushButton("Test RGB")
+        test_rgb_btn.setFixedHeight(26)
+        test_rgb_btn.clicked.connect(self._on_test_rgb)
+        form.addRow("", test_rgb_btn)
+
+        self._refresh_openrgb_status()
+
         return box
+
+    def _refresh_openrgb_status(self) -> None:
+        from mural.utils.openrgb import is_available
+        if is_available():
+            self._openrgb_status_label.setText("Connected to OpenRGB")
+            self._openrgb_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        else:
+            self._openrgb_status_label.setText(
+                "OpenRGB not running — enable SDK server in OpenRGB settings"
+            )
+            self._openrgb_status_label.setStyleSheet("font-size: 11px; color: #888;")
+
+    def _on_test_rgb(self) -> None:
+        from mural.utils.openrgb import is_available, set_all_devices_color
+        self._refresh_openrgb_status()
+        if not is_available():
+            return
+        ok = set_all_devices_color(255, 0, 128)
+        if ok:
+            self._openrgb_status_label.setText("Test sent — Mural pink (255, 0, 128)")
+            self._openrgb_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        else:
+            self._openrgb_status_label.setText("Failed to send color")
+            self._openrgb_status_label.setStyleSheet("font-size: 11px; color: #FF5252;")
+
+    # ------------------------------------------------------------------
+    # Screensaver section
+    # ------------------------------------------------------------------
+
+    def _build_screensaver_section(self) -> QGroupBox:
+        box = QGroupBox("Screensaver")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
+
+        self._screensaver_enabled_chk = QCheckBox("Enable as KDE screensaver")
+        form.addRow("Screensaver:", self._screensaver_enabled_chk)
+
+        self._screensaver_timeout_spin = QSpinBox()
+        self._screensaver_timeout_spin.setRange(1, 120)
+        self._screensaver_timeout_spin.setSuffix(" min")
+        self._screensaver_timeout_spin.setFixedWidth(90)
+        form.addRow("Delay:", self._screensaver_timeout_spin)
+
+        btn_row = QHBoxLayout()
+        install_btn = QPushButton("Install KDE Screensaver")
+        install_btn.setFixedHeight(26)
+        install_btn.clicked.connect(self._on_install_screensaver)
+        btn_row.addWidget(install_btn)
+
+        sddm_btn = QPushButton("Set SDDM Background")
+        sddm_btn.setFixedHeight(26)
+        sddm_btn.clicked.connect(self._on_set_sddm_background)
+        btn_row.addWidget(sddm_btn)
+        btn_row.addStretch()
+        form.addRow("", btn_row)
+
+        self._screensaver_status_label = QLabel()
+        self._screensaver_status_label.setWordWrap(True)
+        self._screensaver_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        form.addRow("", self._screensaver_status_label)
+
+        self._sddm_copy_cmd: str = ""
+        copy_row = QHBoxLayout()
+        self._sddm_copy_btn = QPushButton("Copy sudo command")
+        self._sddm_copy_btn.setFixedHeight(24)
+        self._sddm_copy_btn.hide()
+        self._sddm_copy_btn.clicked.connect(self._on_copy_sddm_cmd)
+        copy_row.addWidget(self._sddm_copy_btn)
+        copy_row.addStretch()
+        form.addRow("", copy_row)
+
+        return box
+
+    @staticmethod
+    def _detect_sddm_theme() -> str:
+        import configparser
+        for conf_path in (
+            Path("/etc/sddm.conf"),
+            Path("/etc/sddm.conf.d/sddm.conf"),
+            Path("/usr/lib/sddm/sddm.conf.d/sddm.conf"),
+        ):
+            if conf_path.exists():
+                try:
+                    cfg = configparser.ConfigParser()
+                    cfg.read(str(conf_path))
+                    theme = cfg.get("Theme", "Current", fallback="")
+                    if theme:
+                        return theme
+                except Exception:
+                    pass
+        return ""
+
+    def _on_install_screensaver(self) -> None:
+        dest = Path("~/.local/share/kservices5/ScreenSavers").expanduser()
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            desktop_file = dest / "mural.desktop"
+            desktop_file.write_text(
+                "[Desktop Entry]\n"
+                "Encoding=UTF-8\n"
+                "Name=Mural\n"
+                "Comment=Animated wallpaper as screensaver\n"
+                "Exec=mural --screensaver\n"
+                "Type=ScreenSaver\n"
+                "X-KDE-Type=KDEScreenSaver\n",
+                encoding="utf-8",
+            )
+            self._screensaver_status_label.setText(
+                f"Installed: {desktop_file}\n"
+                "Configure in System Settings → Display → Screensaver"
+            )
+            self._screensaver_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        except Exception as exc:
+            self._screensaver_status_label.setText(f"Install failed: {exc}")
+            self._screensaver_status_label.setStyleSheet("font-size: 11px; color: #FF5252;")
+
+    def _on_set_sddm_background(self) -> None:
+        import threading
+        from mural.backend.discovery import find_lwe_binary
+
+        binary = find_lwe_binary()
+        if not binary:
+            self._screensaver_status_label.setText("lwe binary not found.")
+            return
+
+        wallpaper = ""
+        if self._core:
+            try:
+                monitors = list(self._core.GetMonitors())
+                if monitors:
+                    wallpaper = self._core.GetCurrentWallpaper(monitors[0]) or ""
+            except Exception:
+                pass
+
+        if not wallpaper:
+            self._screensaver_status_label.setText("No wallpaper currently active.")
+            return
+
+        output_dir = Path("~/.local/share/mural").expanduser()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "sddm_background.jpg"
+        self._screensaver_status_label.setText("Capturing screenshot…")
+        self._screensaver_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        self._sddm_copy_btn.hide()
+
+        def _worker() -> None:
+            import subprocess as _sp
+            try:
+                result = _sp.run(
+                    [str(binary), "--screenshot", str(output_path),
+                     "--screenshot-delay", "2", "--bg", wallpaper],
+                    timeout=15, capture_output=True,
+                )
+                if result.returncode == 0 and output_path.exists():
+                    theme = self._detect_sddm_theme()
+                    if theme:
+                        cmd = (
+                            f"sudo cp {output_path} "
+                            f"/usr/share/sddm/themes/{theme}/background.jpg"
+                        )
+                        self._sddm_copy_cmd = cmd
+                        msg = f"Saved: {output_path}\nTheme: {theme}\nRun: {cmd}"
+                        self._sddm_copy_btn.show()
+                    else:
+                        msg = f"Saved: {output_path}\n(SDDM theme not detected — copy manually)"
+                    self._screensaver_status_label.setText(msg)
+                    self._screensaver_status_label.setStyleSheet(
+                        "font-size: 11px; color: #00C853;"
+                    )
+                else:
+                    self._screensaver_status_label.setText("Screenshot failed.")
+                    self._screensaver_status_label.setStyleSheet(
+                        "font-size: 11px; color: #FF5252;"
+                    )
+            except _sp.TimeoutExpired:
+                self._screensaver_status_label.setText("Screenshot timed out.")
+                self._screensaver_status_label.setStyleSheet(
+                    "font-size: 11px; color: #FF5252;"
+                )
+            except Exception as exc:
+                self._screensaver_status_label.setText(f"Error: {exc}")
+                self._screensaver_status_label.setStyleSheet(
+                    "font-size: 11px; color: #FF5252;"
+                )
+
+        threading.Thread(target=_worker, daemon=True, name="sddm-screenshot").start()
+
+    def _on_copy_sddm_cmd(self) -> None:
+        if self._sddm_copy_cmd:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(self._sddm_copy_cmd)
+            self._screensaver_status_label.setText(
+                self._screensaver_status_label.text() + "\n✓ Copied to clipboard"
+            )
 
     # ------------------------------------------------------------------
     # App Rules section
@@ -1291,6 +1539,15 @@ class SettingsTab(QWidget):
         pywal_source = s.get("pywal_source", "disabled")
         idx = self._pywal_source_combo.findData(pywal_source)
         self._pywal_source_combo.setCurrentIndex(max(idx, 0))
+        self._show_now_playing_chk.setChecked(s.get("show_now_playing", True))
+        self._mpris_to_wallpaper_chk.setChecked(s.get("mpris_to_wallpaper", False))
+        self._openrgb_sync_chk.setChecked(s.get("openrgb_sync", False))
+        rgb_src = s.get("openrgb_color_source", "dominant")
+        rgb_idx = self._openrgb_color_source_combo.findText(rgb_src)
+        if rgb_idx >= 0:
+            self._openrgb_color_source_combo.setCurrentIndex(rgb_idx)
+        self._screensaver_enabled_chk.setChecked(s.get("screensaver_enabled", False))
+        self._screensaver_timeout_spin.setValue(s.get("screensaver_timeout_minutes", 5))
         self._app_list_edit.setPlainText(
             "\n".join(s.get("pause_app_list", []))
         )
@@ -1365,6 +1622,12 @@ class SettingsTab(QWidget):
             "playlist_interval_minutes": self._playlist_spin.value(),
             "monitor_assignments": self._collect_monitor_assignments(),
             "pywal_source": self._pywal_source_combo.currentData(),
+            "show_now_playing": self._show_now_playing_chk.isChecked(),
+            "mpris_to_wallpaper": self._mpris_to_wallpaper_chk.isChecked(),
+            "openrgb_sync": self._openrgb_sync_chk.isChecked(),
+            "openrgb_color_source": self._openrgb_color_source_combo.currentText(),
+            "screensaver_enabled": self._screensaver_enabled_chk.isChecked(),
+            "screensaver_timeout_minutes": self._screensaver_timeout_spin.value(),
             "pause_app_list": pause_app_list,
             "time_schedule_enabled": self._sched_enabled_chk.isChecked(),
             "time_schedule": schedule,

@@ -174,6 +174,10 @@ class IMuralCore:
         """Return the name of the currently active time-of-day slot, or ``"none"``."""
         ...
 
+    def GetNowPlaying(self) -> Str:
+        """Return current MPRIS media info as JSON string, or empty string if nothing is playing."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Service implementation
@@ -229,6 +233,11 @@ class MuralCoreService(IMuralCore):
         self._schedule_timer_id: int | None = None
         self._schedule_last_slot: str = ""
 
+        # MPRIS now-playing state
+        self._mpris_timer_id: int | None = None
+        self._current_media_json: str = ""
+        self._last_media_key: str = ""
+
         _cfg.load()
         if discovery.binary_found:
             self._runner = BackendRunner(
@@ -276,6 +285,7 @@ class MuralCoreService(IMuralCore):
         self._battery_timer_id = GLib.timeout_add_seconds(60, self._on_battery_tick)
         self._app_timer_id = GLib.timeout_add_seconds(10, self._on_app_rule_tick)
         self._start_schedule_timer()
+        self._mpris_timer_id = GLib.timeout_add_seconds(5, self._on_mpris_tick)
 
     def shutdown(self) -> None:
         """Stop all timers and the lwe subprocess."""
@@ -287,6 +297,9 @@ class MuralCoreService(IMuralCore):
             GLib.source_remove(self._app_timer_id)
             self._app_timer_id = None
         self._stop_schedule_timer()
+        if self._mpris_timer_id is not None:
+            GLib.source_remove(self._mpris_timer_id)
+            self._mpris_timer_id = None
         if self._runner and self._runner.is_running():
             logger.info("Stopping lwe subprocess")
             self._runner.stop()
@@ -317,6 +330,8 @@ class MuralCoreService(IMuralCore):
                 primary = self._monitor_manager.primary_monitor()
                 if primary is None or monitor == primary.name:
                     self._run_pywal_async(path)
+            if bool(_cfg.get("openrgb_sync", False)):
+                self._run_openrgb_async(path)
         return result
 
     def GetCurrentWallpaper(self, monitor: str) -> str:  # type: ignore[override]
@@ -581,6 +596,81 @@ class MuralCoreService(IMuralCore):
                 logger.debug("pywal: not available or returned non-zero")
 
         threading.Thread(target=_worker, daemon=True, name="pywal-worker").start()
+
+    def _run_openrgb_async(self, wallpaper_path: str) -> None:
+        """Sync RGB lighting to the wallpaper palette in a background thread."""
+        color_source = str(_cfg.get("openrgb_color_source", "dominant"))
+
+        def _worker() -> None:
+            try:
+                from mural.utils.openrgb import is_available, set_color_from_hex
+                from mural.utils.palette import extract_palette
+                if not is_available():
+                    return
+                palette = extract_palette(wallpaper_path)
+                if not palette:
+                    return
+                source_idx = {"dominant": 0, "secondary": 1, "tertiary": 2}.get(
+                    color_source, 0
+                )
+                if color_source == "average":
+                    parts = [c.lstrip("#") for c in palette if len(c.lstrip("#")) == 6]
+                    if not parts:
+                        return
+                    r = int(sum(int(h[0:2], 16) for h in parts) / len(parts))
+                    g = int(sum(int(h[2:4], 16) for h in parts) / len(parts))
+                    b = int(sum(int(h[4:6], 16) for h in parts) / len(parts))
+                    hex_color = f"#{r:02x}{g:02x}{b:02x}"
+                else:
+                    hex_color = palette[min(source_idx, len(palette) - 1)]
+                set_color_from_hex(hex_color)
+                logger.debug("OpenRGB: set color %s from %s", hex_color, color_source)
+            except Exception as exc:
+                logger.debug("OpenRGB worker failed: %s", exc)
+
+        threading.Thread(target=_worker, daemon=True, name="openrgb-sync").start()
+
+    def _on_mpris_tick(self) -> bool:
+        """Poll MPRIS every 5 seconds and update cached media info."""
+        try:
+            from mural.utils.mpris import get_current_media
+            media = get_current_media()
+
+            if media and media.playing:
+                import json as _json
+                new_json = _json.dumps({
+                    "title": media.title,
+                    "artist": media.artist,
+                    "album": media.album,
+                    "art_url": media.art_url,
+                })
+                new_key = f"{media.title}|{media.artist}"
+            else:
+                new_json = ""
+                new_key = ""
+
+            if new_key != self._last_media_key:
+                old_key = self._last_media_key
+                self._current_media_json = new_json
+                self._last_media_key = new_key
+                if new_key:
+                    logger.info("MPRIS: now playing %r by %r", media.title, media.artist)  # type: ignore[union-attr]
+                elif old_key:
+                    logger.info("MPRIS: playback stopped")
+                if media and media.playing and bool(_cfg.get("mpris_to_wallpaper", False)):
+                    props = {
+                        "mediametadata_title": media.title,
+                        "mediametadata_artist": media.artist,
+                        "mediametadata_album": media.album,
+                    }
+                    if self._runner:
+                        self._runner.set_extra_props(props)
+        except Exception as exc:
+            logger.debug("MPRIS tick error: %s", exc)
+        return True
+
+    def GetNowPlaying(self) -> str:  # type: ignore[override]
+        return self._current_media_json
 
     # ------------------------------------------------------------------
     # Power / app-rule pause management

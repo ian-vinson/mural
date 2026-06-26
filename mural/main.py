@@ -311,7 +311,65 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="no_tray",
         help="Do not create a system tray icon",
     )
+    parser.add_argument(
+        "--screensaver",
+        action="store_true",
+        help="Launch current wallpaper as a fullscreen screensaver window",
+    )
     return parser.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------
+# Screensaver mode
+# ---------------------------------------------------------------------------
+
+def _run_screensaver(argv: list[str] | None = None) -> int:
+    """Launch the current wallpaper in a fullscreen window for screensaver use."""
+    from mural.backend.discovery import find_lwe_binary
+
+    binary = find_lwe_binary()
+    if not binary:
+        print("mural: lwe binary not found — cannot run screensaver", file=sys.stderr)
+        return 1
+
+    # Try to get the current wallpaper from the running service.
+    wallpaper = ""
+    core = _connect_to_service()
+    if core:
+        try:
+            monitors = list(core.GetMonitors())
+            if monitors:
+                wallpaper = core.GetCurrentWallpaper(monitors[0]) or ""
+        except Exception:
+            pass
+
+    if not wallpaper:
+        print("mural: no wallpaper is currently active", file=sys.stderr)
+        return 1
+
+    # Determine screen resolution via Qt (minimal QApplication).
+    app = QApplication(sys.argv if argv is None else [sys.argv[0]] + list(argv))
+    screen = app.primaryScreen()
+    if screen:
+        geo = screen.geometry()
+        w, h = geo.width(), geo.height()
+    else:
+        w, h = 1920, 1080
+
+    proc = subprocess.Popen([
+        str(binary),
+        "--window", f"0x0x{w}x{h}",
+        wallpaper,
+    ])
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    return proc.returncode if proc.returncode is not None else 0
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +393,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     logger.info("Mural %s starting", APP_VERSION)
+
+    if args.screensaver:
+        return _run_screensaver(argv)
 
     app = QApplication(sys.argv if argv is None else [sys.argv[0]] + list(argv))
     app.setApplicationName(APP_NAME)

@@ -154,6 +154,12 @@ class _PreviewPanel(QWidget):
         self._build_ui()
         self._show_empty_state()
 
+        self._np_timer = QTimer(self)
+        self._np_timer.setInterval(5000)
+        self._np_timer.timeout.connect(self._refresh_now_playing)
+        if core_proxy is not None:
+            self._np_timer.start()
+
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
@@ -229,6 +235,9 @@ class _PreviewPanel(QWidget):
 
         self._props_section = self._build_props_section()
         layout.addWidget(self._props_section)
+
+        self._np_widget = self._build_now_playing_widget()
+        layout.addWidget(self._np_widget)
 
         layout.addStretch()
 
@@ -402,10 +411,104 @@ class _PreviewPanel(QWidget):
         """
         self._core = proxy
         self._refresh_monitor_list()
+        if proxy is not None:
+            self._np_timer.start()
+            self._refresh_now_playing()
+        else:
+            self._np_timer.stop()
+            self._np_widget.hide()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _build_now_playing_widget(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 6, 0, 0)
+        v.setSpacing(4)
+
+        header = QHBoxLayout()
+        icon = QLabel("♪")
+        icon.setStyleSheet("font-size: 13px; color: #888;")
+        header.addWidget(icon)
+        lbl = QLabel("Now Playing")
+        lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #aaa;")
+        header.addWidget(lbl)
+        header.addStretch()
+        v.addLayout(header)
+
+        content = QHBoxLayout()
+        content.setSpacing(8)
+        self._np_art_label = QLabel()
+        self._np_art_label.setFixedSize(40, 40)
+        self._np_art_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._np_art_label.setStyleSheet(
+            "background: #222; border-radius: 4px; color: #666; font-size: 18px;"
+        )
+        self._np_art_label.setText("♪")
+        content.addWidget(self._np_art_label)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        self._np_title_label = QLabel()
+        self._np_title_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #e0e0e0;")
+        self._np_title_label.setWordWrap(True)
+        text_col.addWidget(self._np_title_label)
+        self._np_artist_label = QLabel()
+        self._np_artist_label.setStyleSheet("font-size: 11px; color: #888;")
+        self._np_artist_label.setWordWrap(True)
+        text_col.addWidget(self._np_artist_label)
+        content.addLayout(text_col, 1)
+        v.addLayout(content)
+
+        w.hide()
+        return w
+
+    def _refresh_now_playing(self) -> None:
+        """Poll the Core Service for MPRIS media and update the Now Playing widget."""
+        from mural.gui.settings_tab import _load_settings
+        if not _load_settings().get("show_now_playing", True):
+            self._np_widget.hide()
+            return
+        if not self._core:
+            self._np_widget.hide()
+            return
+        try:
+            json_str = str(self._core.GetNowPlaying())
+        except Exception:
+            self._np_widget.hide()
+            return
+        if not json_str:
+            self._np_widget.hide()
+            return
+        import json as _json
+        try:
+            media = _json.loads(json_str)
+        except Exception:
+            self._np_widget.hide()
+            return
+
+        self._np_title_label.setText(media.get("title") or "Unknown Track")
+        self._np_artist_label.setText(media.get("artist") or "")
+
+        art_url = media.get("art_url", "")
+        if art_url and art_url.startswith("file://"):
+            px = QPixmap(art_url[7:])
+            if not px.isNull():
+                self._np_art_label.setPixmap(
+                    px.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
+                )
+                self._np_art_label.setText("")
+            else:
+                self._np_art_label.setPixmap(QPixmap())
+                self._np_art_label.setText("♪")
+        else:
+            self._np_art_label.setPixmap(QPixmap())
+            self._np_art_label.setText("♪")
+
+        self._np_widget.show()
 
     def _show_empty_state(self) -> None:
         self._thumb_label.setPixmap(QPixmap())

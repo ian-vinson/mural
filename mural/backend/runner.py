@@ -165,6 +165,7 @@ class BackendRunner:
 
         self._process: subprocess.Popen[bytes] | None = None
         self._assignments: list[WallpaperAssignment] = []
+        self._extra_props: dict[str, str] = {}
         self._monitor_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._restart_count = 0
@@ -230,6 +231,12 @@ class BackendRunner:
 
         if self._monitor_thread and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=5.0)
+
+    def set_extra_props(self, props: dict[str, str]) -> None:
+        """Update dynamic --set-property overrides and restart lwe if running."""
+        self._extra_props = dict(props)
+        if self.is_running():
+            self.restart()
 
     def restart(self) -> None:
         """Restart lwe with the current assignments."""
@@ -350,6 +357,9 @@ class BackendRunner:
         for assignment in assignments:
             for key, value in load_overrides(assignment.wallpaper).items():
                 cmd += ["--set-property", f"{key}={value}"]
+
+        for key, value in self._extra_props.items():
+            cmd += ["--set-property", f"{key}={value}"]
 
         return cmd
 
