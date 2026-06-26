@@ -9,6 +9,15 @@ required after install.
 
 Built for the Linux desktop Wallpaper Engine always refused to support.
 
+![Mural Library Tab](assets/screenshots/1.png)
+
+![Mural Platform](assets/screenshots/2.png)
+
+![Mural Playlist](assets/screenshots/3.png)
+
+![Mural Settings](assets/screenshots/4.png)
+
+![Mural Settings](assets/screenshots/5.png)
 ---
 
 PROJECT STATUS
