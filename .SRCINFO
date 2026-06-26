@@ -1,0 +1,31 @@
+pkgbase = mural-git
+	pkgdesc = Animated wallpaper platform for Linux — GUI frontend for linux-wallpaperengine
+	pkgver = 0.2.0
+	pkgrel = 1
+	url = https://github.com/ian-vinson/mural
+	arch = x86_64
+	license = GPL3
+	makedepends = python-build
+	makedepends = python-installer
+	makedepends = python-wheel
+	makedepends = python-hatchling
+	depends = python>=3.11
+	depends = python-pyside6
+	depends = python-dasbus
+	depends = python-requests
+	depends = python-pillow
+	depends = python-psutil
+	depends = python-watchdog
+	depends = python-gobject
+	depends = linux-wallpaperengine-git
+	optdepends = python-pywal: system color scheme integration
+	optdepends = matugen: Material You color scheme integration
+	optdepends = openrgb: RGB hardware sync
+	optdepends = waybar: Waybar module support
+	optdepends = nvidia-utils: NVIDIA GPU memory monitoring
+	provides = mural
+	conflicts = mural
+	source = mural-git::git+https://github.com/ian-vinson/mural.git#tag=v0.2.0
+	sha256sums = SKIP
+
+pkgname = mural-git

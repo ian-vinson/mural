@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "mural"
-version = "0.2.0-alpha"
+version = "0.2.0"
 description = "Animated wallpaper platform for Linux"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
@@ -23,6 +23,5 @@ mural = "mural.main:main"
 mural-core = "mural.core.service:main"
 mural-cli = "mural.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["mural*"]
+[tool.hatch.build.targets.wheel]
+packages = ["mural"]

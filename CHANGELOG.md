@@ -4,7 +4,7 @@ All notable changes to Mural are documented here.
 
 ---
 
-## [0.2.0-alpha] — 2026-06-26
+## [0.2.0] — 2026-06-26
 
 ### Added
 
