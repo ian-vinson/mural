@@ -1261,9 +1261,27 @@ class SettingsTab(QWidget):
         form.addRow("Delay:", self._screensaver_timeout_spin)
 
         self._auto_sddm_update_chk = QCheckBox(
-            "Auto-update SDDM background when screen locks (requires pkexec)"
+            "Auto-update SDDM login screen when display locks"
         )
         form.addRow("", self._auto_sddm_update_chk)
+
+        sddm_info = QLabel(
+            "When your screen locks, Mural captures a still frame of your current "
+            "wallpaper and sets it as the SDDM login background. "
+            "Requires polkit authentication."
+        )
+        sddm_info.setWordWrap(True)
+        sddm_info.setStyleSheet("font-size: 11px; color: #888; padding-left: 8px;")
+        form.addRow("", sddm_info)
+
+        self._sddm_lock_status_label = QLabel("Not yet captured")
+        self._sddm_lock_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        form.addRow("Lock snapshot:", self._sddm_lock_status_label)
+
+        capture_btn = QPushButton("Capture SDDM Screenshot Now")
+        capture_btn.setFixedHeight(26)
+        capture_btn.clicked.connect(self._on_capture_sddm_now)
+        form.addRow("", capture_btn)
 
         btn_row = QHBoxLayout()
         install_btn = QPushButton("Install KDE Screensaver")
@@ -1313,6 +1331,29 @@ class SettingsTab(QWidget):
                 except Exception:
                     pass
         return ""
+
+    def _on_capture_sddm_now(self) -> None:
+        """Trigger an immediate SDDM screenshot via the Core Service."""
+        if not self._core:
+            self._sddm_lock_status_label.setText("Core Service not connected")
+            self._sddm_lock_status_label.setStyleSheet("font-size: 11px; color: #FF5252;")
+            return
+        self._sddm_lock_status_label.setText("Capturing…")
+        self._sddm_lock_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        try:
+            ok = bool(self._core.CaptureSddmScreenshot())
+        except Exception as exc:
+            self._sddm_lock_status_label.setText(f"Error: {exc}")
+            self._sddm_lock_status_label.setStyleSheet("font-size: 11px; color: #FF5252;")
+            return
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        if ok:
+            self._sddm_lock_status_label.setText(f"Last updated: {ts}")
+            self._sddm_lock_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        else:
+            self._sddm_lock_status_label.setText(f"Capture failed at {ts}")
+            self._sddm_lock_status_label.setStyleSheet("font-size: 11px; color: #FF5252;")
 
     def _on_install_screensaver(self) -> None:
         dest = Path("~/.local/share/kservices5/ScreenSavers").expanduser()

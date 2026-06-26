@@ -182,6 +182,13 @@ class IMuralCore:
         """Return JSON array [{id, name}] of KDE activities, or '[]' on non-Plasma desktops."""
         ...
 
+    def CaptureSddmScreenshot(self) -> Bool:
+        """Capture the current wallpaper as a JPEG and push it to the SDDM background path.
+
+        Returns ``True`` on success, ``False`` if lwe is not available or the capture failed.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Service implementation
@@ -743,10 +750,10 @@ class MuralCoreService(IMuralCore):
             self._gio_conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
             self._screensaver_sub_id = self._gio_conn.signal_subscribe(
-                None,
+                "org.freedesktop.ScreenSaver",
                 "org.freedesktop.ScreenSaver",
                 "ActiveChanged",
-                None,
+                "/org/freedesktop/ScreenSaver",
                 None,
                 Gio.DBusSignalFlags.NONE,
                 self._on_screensaver_active_changed,
@@ -789,85 +796,72 @@ class MuralCoreService(IMuralCore):
             active = bool(parameters.get_child_value(0).unpack())
         except Exception:
             return
-        if active:
+        if active and bool(_cfg.get("auto_sddm_update", False)):
             logger.info("Screen locked — triggering SDDM screenshot")
             threading.Thread(
-                target=self._on_screen_locked, daemon=True, name="sddm-lock-shot"
+                target=self._capture_sddm_screenshot, daemon=True, name="sddm-lock-shot"
             ).start()
 
-    def _on_screen_locked(self) -> None:
-        """Capture current wallpaper as a JPEG and optionally copy to SDDM theme dir."""
+    def _capture_sddm_screenshot(self) -> bool:
+        """Capture the current wallpaper frame and push it to the SDDM background path.
+
+        Returns True on success.  Safe to call from any thread.
+        """
         import subprocess as _sp
-        from mural.backend.discovery import find_lwe_binary
 
-        binary = find_lwe_binary()
+        binary = self._discovery.binary if self._discovery.binary_found else None
         if not binary:
-            logger.debug("sddm-lock: lwe binary not found")
-            return
+            logger.debug("sddm-screenshot: lwe binary not found")
+            return False
 
+        assets = self._discovery.assets_path
         monitors = self.GetMonitors()
-        wallpaper = self.GetCurrentWallpaper(monitors[0]) if monitors else ""
+        if not monitors:
+            logger.debug("sddm-screenshot: no monitors")
+            return False
+        assignment = self._monitor_manager.get_assignment(monitors[0])
+        wallpaper = assignment.wallpaper if assignment else ""
         if not wallpaper:
-            logger.debug("sddm-lock: no wallpaper active")
-            return
+            logger.debug("sddm-screenshot: no wallpaper active")
+            return False
 
-        output_dir = Path("~/.local/share/mural").expanduser()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / "sddm_lock.jpg"
+        out_path = Path("~/.local/share/mural/sddm_lock.jpg").expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cmd = [str(binary)]
+        if assets:
+            cmd += ["--assets-dir", str(assets)]
+        cmd += [
+            "--screenshot", str(out_path),
+            "--screenshot-delay", "1",
+            "--bg", wallpaper,
+        ]
+        try:
+            result = _sp.run(cmd, timeout=10, capture_output=True)
+            if result.returncode != 0 or not out_path.exists():
+                logger.warning("sddm-screenshot: lwe exited with rc=%d", result.returncode)
+                return False
+            logger.info("sddm-screenshot: saved %s", out_path)
+        except Exception as exc:
+            logger.debug("sddm-screenshot: error: %s", exc)
+            return False
+
+        sddm_bg = _detect_sddm_background_path()
+        if sddm_bg is None:
+            logger.info("sddm-screenshot: could not detect background path")
+            return True  # screenshot succeeded, just no place to copy it
 
         try:
-            result = _sp.run(
-                [
-                    str(binary),
-                    "--screenshot", str(output_path),
-                    "--screenshot-delay", "0",
-                    "--bg", wallpaper,
-                ],
-                timeout=15,
-                capture_output=True,
-            )
-            if result.returncode != 0 or not output_path.exists():
-                logger.debug("sddm-lock: screenshot failed (rc=%d)", result.returncode)
-                return
-            logger.info("sddm-lock: screenshot saved to %s", output_path)
+            import subprocess as _sp2
+            _sp2.Popen(["pkexec", "cp", str(out_path), str(sddm_bg)])
+            logger.info("sddm-screenshot: pkexec copy → %s", sddm_bg)
         except Exception as exc:
-            logger.debug("sddm-lock: screenshot error: %s", exc)
-            return
+            logger.debug("sddm-screenshot: pkexec failed: %s", exc)
+        return True
 
-        if not bool(_cfg.get("auto_sddm_update", False)):
-            return
-
-        import configparser as _cp
-        theme = ""
-        for conf_path in (
-            Path("/etc/sddm.conf"),
-            Path("/etc/sddm.conf.d/sddm.conf"),
-            Path("/usr/lib/sddm/sddm.conf.d/sddm.conf"),
-        ):
-            if conf_path.exists():
-                try:
-                    cfg = _cp.ConfigParser()
-                    cfg.read(str(conf_path))
-                    theme = cfg.get("Theme", "Current", fallback="")
-                    if theme:
-                        break
-                except Exception:
-                    pass
-
-        if not theme:
-            logger.debug("sddm-lock: SDDM theme not detected — skipping auto-copy")
-            return
-
-        dest = Path(f"/usr/share/sddm/themes/{theme}/background.jpg")
-        try:
-            _sp.run(
-                ["pkexec", "cp", str(output_path), str(dest)],
-                timeout=30,
-                check=True,
-            )
-            logger.info("sddm-lock: updated %s via pkexec", dest)
-        except Exception as exc:
-            logger.debug("sddm-lock: pkexec copy failed: %s", exc)
+    def CaptureSddmScreenshot(self) -> bool:  # type: ignore[override]
+        """D-Bus method: capture wallpaper screenshot and update SDDM background."""
+        return self._capture_sddm_screenshot()
 
     def _on_activity_changed(
         self, connection, sender, object_path, interface_name, signal_name, parameters, user_data
@@ -1185,6 +1179,27 @@ class MuralCoreService(IMuralCore):
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _detect_sddm_background_path() -> "Path | None":
+    """Return the SDDM background file path to overwrite, or None if undetectable.
+
+    Reads ``Background=`` from ``[Theme]`` in ``/etc/sddm.conf`` and
+    ``/etc/sddm.conf.d/*.conf``.  Falls back to the Breeze theme path.
+    """
+    import configparser
+    import glob
+
+    for conf_path in ["/etc/sddm.conf"] + sorted(glob.glob("/etc/sddm.conf.d/*.conf")):
+        try:
+            cfg = configparser.ConfigParser()
+            cfg.read(conf_path)
+            bg = cfg.get("Theme", "Background", fallback=None)
+            if bg:
+                return Path(bg)
+        except Exception:
+            pass
+    return Path("/usr/share/sddm/themes/breeze/background.jpg")
+
 
 _PREVIEW_NAMES = (
     "preview.jpg", "preview.png", "preview.gif",
