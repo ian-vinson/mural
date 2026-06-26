@@ -305,6 +305,8 @@ class MuralCoreService(IMuralCore):
                 clamping=str(_cfg.get("clamping", "clamp")),
                 render_debug=bool(_cfg.get("render_debug", False)),
                 render_debug_type=str(_cfg.get("render_debug_type", "full")),
+                fade_transition=bool(_cfg.get("fade_transition", True)),
+                fade_duration_ms=int(_cfg.get("fade_duration_ms", 400)),
             )
 
     # ------------------------------------------------------------------
@@ -451,6 +453,8 @@ class MuralCoreService(IMuralCore):
                 clamping=clamping,
                 render_debug=render_debug,
                 render_debug_type=render_debug_type,
+                fade_transition=bool(_cfg.get("fade_transition", True)),
+                fade_duration_ms=int(_cfg.get("fade_duration_ms", 400)),
             )
         self._update_tick_timer()
         # Re-evaluate pause conditions and schedule with updated config.

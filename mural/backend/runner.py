@@ -140,6 +140,8 @@ class BackendRunner:
         clamping: str = "clamp",
         render_debug: bool = False,
         render_debug_type: str = "full",
+        fade_transition: bool = True,
+        fade_duration_ms: int = 400,
     ) -> None:
         self._binary = Path(binary_path)
         self._assets = Path(assets_path) if assets_path else None
@@ -162,6 +164,8 @@ class BackendRunner:
         self._clamping = clamping
         self._render_debug = render_debug
         self._render_debug_type = render_debug_type
+        self._fade_transition = fade_transition
+        self._fade_duration_ms = fade_duration_ms
 
         self._process: subprocess.Popen[bytes] | None = None
         self._assignments: list[WallpaperAssignment] = []
@@ -216,9 +220,27 @@ class BackendRunner:
 
         if old_process is not None:
             # Sleep outside the lock so other callers aren't blocked.
-            # 400 ms gives the new lwe time to initialize and start rendering.
-            time.sleep(0.4)
-            _kill_process(old_process)
+            if not self._fade_transition:
+                # No fade overlay: give the new process 600 ms to initialize
+                # and claim the Wayland surface before pulling the old one away.
+                time.sleep(0.6)
+            # When a fade_transition is active, SetWallpaper is called at peak
+            # opacity (full black), so the compositor is already obscured — kill
+            # the old process immediately; any surface flicker is invisible.
+
+            # SIGTERM → 1 s wait → SIGKILL: lets lwe clean up its Wayland
+            # surface registration gracefully before dying.
+            if old_process.poll() is None:
+                old_process.send_signal(signal.SIGTERM)
+                try:
+                    old_process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    old_process.kill()
+                    old_process.wait()
+
+            # Give the Wayland compositor 100 ms to release the surface and
+            # composite a clean frame before the new process takes over.
+            time.sleep(0.1)
             logger.debug("Overlap transition: retired old lwe (pid=%d)", old_process.pid)
 
     def stop(self) -> None:
@@ -264,6 +286,8 @@ class BackendRunner:
         clamping: str = "clamp",
         render_debug: bool = False,
         render_debug_type: str = "full",
+        fade_transition: bool = True,
+        fade_duration_ms: int = 400,
     ) -> None:
         """Update playback settings and restart lwe if it is running."""
         self._fps_limit = fps_limit
@@ -281,6 +305,8 @@ class BackendRunner:
         self._clamping = clamping
         self._render_debug = render_debug
         self._render_debug_type = render_debug_type
+        self._fade_transition = fade_transition
+        self._fade_duration_ms = fade_duration_ms
         if self.is_running():
             self.restart()
 
