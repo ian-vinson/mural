@@ -21,6 +21,7 @@ dependencies = [
 [project.scripts]
 mural = "mural.main:main"
 mural-core = "mural.core.service:main"
+mural-cli = "mural.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

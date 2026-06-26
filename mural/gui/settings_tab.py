@@ -37,7 +37,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QTime, Signal
+from PySide6.QtCore import Qt, QSize, QTime, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -48,8 +48,12 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
@@ -432,6 +436,54 @@ class SettingsTab(QWidget):
         detect_btn.clicked.connect(self._refresh_monitors)
         layout.addWidget(detect_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
+        # ── Profiles ──
+        sep = QLabel("── Profiles ──")
+        sep.setStyleSheet("color: #666; font-size: 11px; padding-top: 6px;")
+        layout.addWidget(sep)
+
+        save_profile_btn = QPushButton("Save current as profile…")
+        save_profile_btn.setFixedHeight(28)
+        save_profile_btn.clicked.connect(self._on_save_profile)
+        layout.addWidget(save_profile_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self._profile_list = QListWidget()
+        self._profile_list.setFixedHeight(160)
+        self._profile_list.setAlternatingRowColors(True)
+        self._profile_list.currentItemChanged.connect(self._on_profile_selection_changed)
+        self._profile_list.itemDoubleClicked.connect(lambda _item: self._on_load_profile())
+        layout.addWidget(self._profile_list)
+
+        self._profile_empty_label = QLabel(
+            "No profiles saved yet.\n"
+            "Click 'Save current as profile…' to create one."
+        )
+        self._profile_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._profile_empty_label.setStyleSheet("color: #666; font-size: 11px;")
+        self._profile_empty_label.hide()
+        layout.addWidget(self._profile_empty_label)
+
+        profile_btn_row = QHBoxLayout()
+        self._profile_load_btn = QPushButton("Load")
+        self._profile_load_btn.setFixedHeight(26)
+        self._profile_load_btn.setEnabled(False)
+        self._profile_load_btn.clicked.connect(self._on_load_profile)
+        profile_btn_row.addWidget(self._profile_load_btn)
+
+        self._profile_rename_btn = QPushButton("Rename")
+        self._profile_rename_btn.setFixedHeight(26)
+        self._profile_rename_btn.setEnabled(False)
+        self._profile_rename_btn.clicked.connect(self._on_rename_profile)
+        profile_btn_row.addWidget(self._profile_rename_btn)
+
+        self._profile_delete_btn = QPushButton("Delete")
+        self._profile_delete_btn.setFixedHeight(26)
+        self._profile_delete_btn.setEnabled(False)
+        self._profile_delete_btn.clicked.connect(self._on_delete_profile)
+        profile_btn_row.addWidget(self._profile_delete_btn)
+
+        profile_btn_row.addStretch()
+        layout.addLayout(profile_btn_row)
+
         return box
 
     def _refresh_monitors(self) -> None:
@@ -528,6 +580,157 @@ class SettingsTab(QWidget):
                         break
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Profile management
+    # ------------------------------------------------------------------
+
+    def _refresh_profiles(self) -> None:
+        if not self._core:
+            return
+        try:
+            profiles: list[dict] = json.loads(self._core.GetProfiles())
+        except Exception:
+            return
+
+        self._profile_list.clear()
+        if not profiles:
+            self._profile_list.hide()
+            self._profile_empty_label.show()
+            return
+
+        self._profile_empty_label.hide()
+        self._profile_list.show()
+
+        for p in profiles:
+            assignments: dict = p.get("assignments", {})
+            summary = "  ".join(
+                f"{mon}: {Path(wp).name}"
+                for mon, wp in assignments.items()
+                if wp
+            ) or "(no assignments)"
+
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 48))
+            item.setData(Qt.ItemDataRole.UserRole, p["id"])
+            item.setToolTip(f"Created: {p.get('created_at', '')}")
+            self._profile_list.addItem(item)
+
+            widget = QWidget()
+            vbox = QVBoxLayout(widget)
+            vbox.setContentsMargins(6, 4, 6, 4)
+            vbox.setSpacing(2)
+            name_lbl = QLabel(p["name"])
+            name_lbl.setStyleSheet("font-size: 12px; font-weight: bold;")
+            vbox.addWidget(name_lbl)
+            sum_lbl = QLabel(summary)
+            sum_lbl.setStyleSheet("font-size: 11px; color: #888;")
+            vbox.addWidget(sum_lbl)
+            widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._profile_list.setItemWidget(item, widget)
+
+    def _on_profile_selection_changed(self) -> None:
+        has = self._profile_list.currentItem() is not None
+        self._profile_load_btn.setEnabled(has)
+        self._profile_rename_btn.setEnabled(has)
+        self._profile_delete_btn.setEnabled(has)
+
+    def _current_profile_id(self) -> str | None:
+        item = self._profile_list.currentItem()
+        if not item:
+            return None
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    def _current_profile_name(self) -> str:
+        item = self._profile_list.currentItem()
+        if not item:
+            return ""
+        widget = self._profile_list.itemWidget(item)
+        if widget:
+            lbl = widget.findChild(QLabel)
+            if lbl:
+                return lbl.text()
+        return ""
+
+    def _on_save_profile(self) -> None:
+        if not self._core:
+            self._status_label.setText("Core Service not connected")
+            return
+        name, ok = QInputDialog.getText(self, "Save Profile", "Profile name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        try:
+            self._core.SaveProfile(name)
+        except Exception as exc:
+            self._status_label.setText(f"Save failed: {exc}")
+            return
+        self._refresh_profiles()
+        self._status_label.setText(f"Profile '{name}' saved")
+
+    def _on_load_profile(self) -> None:
+        if not self._core:
+            return
+        profile_id = self._current_profile_id()
+        name = self._current_profile_name()
+        if not profile_id:
+            return
+        try:
+            ok = bool(self._core.LoadProfile(profile_id))
+        except Exception as exc:
+            self._status_label.setText(f"Load failed: {exc}")
+            return
+        if ok:
+            self._status_label.setText(f"Profile '{name}' loaded — wallpapers applied")
+            self._refresh_monitors()
+        else:
+            self._status_label.setText("Profile not found or failed to load")
+
+    def _on_rename_profile(self) -> None:
+        if not self._core:
+            return
+        profile_id = self._current_profile_id()
+        current_name = self._current_profile_name()
+        if not profile_id:
+            return
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Profile", "New name:", text=current_name
+        )
+        if not ok or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        try:
+            ok = bool(self._core.RenameProfile(profile_id, new_name))
+        except Exception as exc:
+            self._status_label.setText(f"Rename failed: {exc}")
+            return
+        if ok:
+            self._refresh_profiles()
+            self._status_label.setText(f"Profile renamed to '{new_name}'")
+
+    def _on_delete_profile(self) -> None:
+        if not self._core:
+            return
+        profile_id = self._current_profile_id()
+        name = self._current_profile_name()
+        if not profile_id:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Profile",
+            f"Delete profile '{name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            ok = bool(self._core.DeleteProfile(profile_id))
+        except Exception as exc:
+            self._status_label.setText(f"Delete failed: {exc}")
+            return
+        if ok:
+            self._refresh_profiles()
+            self._status_label.setText("Profile deleted")
 
     def _collect_monitor_assignments(self) -> dict[str, dict]:
         """Read enabled state from the monitor table into a dict."""
@@ -1214,6 +1417,44 @@ class SettingsTab(QWidget):
 
         self._refresh_openrgb_status()
 
+        # ── Waybar ──
+        form.addRow(QLabel(""))
+        wb_header = QLabel("<b>Waybar</b>")
+        wb_header.setStyleSheet("font-size: 12px; color: #ccc;")
+        form.addRow("", wb_header)
+
+        self._waybar_status_label = QLabel()
+        self._waybar_status_label.setStyleSheet("font-size: 11px;")
+        form.addRow("Status:", self._waybar_status_label)
+        self._refresh_waybar_status()
+
+        wb_btn_row = QHBoxLayout()
+        wb_config_btn = QPushButton("Copy Waybar config snippet")
+        wb_config_btn.setFixedHeight(26)
+        wb_config_btn.clicked.connect(self._on_copy_waybar_config)
+        wb_btn_row.addWidget(wb_config_btn)
+
+        wb_css_btn = QPushButton("Copy CSS snippet")
+        wb_css_btn.setFixedHeight(26)
+        wb_css_btn.clicked.connect(self._on_copy_waybar_css)
+        wb_btn_row.addWidget(wb_css_btn)
+
+        wb_install_btn = QPushButton("Install module")
+        wb_install_btn.setFixedHeight(26)
+        wb_install_btn.clicked.connect(self._on_install_waybar_module)
+        wb_btn_row.addWidget(wb_install_btn)
+
+        wb_btn_row.addStretch()
+        form.addRow("", wb_btn_row)
+
+        wb_info = QLabel(
+            "The module shows your current wallpaper name with a colored dot matching "
+            "its dominant color. Updates every 5 seconds."
+        )
+        wb_info.setWordWrap(True)
+        wb_info.setStyleSheet("font-size: 11px; color: #888; padding-left: 8px;")
+        form.addRow("", wb_info)
+
         return box
 
     def _refresh_openrgb_status(self) -> None:
@@ -1239,6 +1480,66 @@ class SettingsTab(QWidget):
         else:
             self._openrgb_status_label.setText("Failed to send color")
             self._openrgb_status_label.setStyleSheet("font-size: 11px; color: #FF5252;")
+
+    _WAYBAR_MODULE_PATH = Path("~/.local/share/mural/waybar/mural-waybar.py").expanduser()
+    _WAYBAR_CONFIG_SNIPPET = """\
+"custom/mural": {
+    "exec": "~/.local/share/mural/waybar/mural-waybar.py",
+    "interval": 5,
+    "format": "{}",
+    "tooltip": true,
+    "return-type": "json"
+}"""
+    _WAYBAR_CSS_SNIPPET = """\
+#custom-mural {
+    color: inherit;
+    padding: 0 8px;
+}
+#custom-mural.active {
+    color: @foreground;
+}"""
+
+    def _refresh_waybar_status(self) -> None:
+        if self._WAYBAR_MODULE_PATH.exists():
+            self._waybar_status_label.setText(
+                f"Installed at {self._WAYBAR_MODULE_PATH}"
+            )
+            self._waybar_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        else:
+            self._waybar_status_label.setText(
+                "Not installed — click 'Install module' to install"
+            )
+            self._waybar_status_label.setStyleSheet("font-size: 11px; color: #888;")
+
+    def _on_copy_waybar_config(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(self._WAYBAR_CONFIG_SNIPPET)
+        self._waybar_status_label.setText("Waybar config snippet copied to clipboard")
+        self._waybar_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+
+    def _on_copy_waybar_css(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(self._WAYBAR_CSS_SNIPPET)
+        self._waybar_status_label.setText("CSS snippet copied to clipboard")
+        self._waybar_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+
+    def _on_install_waybar_module(self) -> None:
+        import shutil as _shutil
+        src_dir = Path(__file__).parent.parent / "waybar"
+        src_script = src_dir / "mural-waybar.py"
+        src_css = src_dir / "mural-waybar.css"
+        dest_dir = self._WAYBAR_MODULE_PATH.parent
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            if src_script.exists():
+                _shutil.copy2(str(src_script), str(dest_dir / "mural-waybar.py"))
+                (dest_dir / "mural-waybar.py").chmod(0o755)
+            if src_css.exists():
+                _shutil.copy2(str(src_css), str(dest_dir / "mural-waybar.css"))
+            self._refresh_waybar_status()
+        except Exception as exc:
+            self._waybar_status_label.setText(f"Install failed: {exc}")
+            self._waybar_status_label.setStyleSheet("font-size: 11px; color: #FF5252;")
 
     # ------------------------------------------------------------------
     # Screensaver section
@@ -1889,6 +2190,10 @@ class SettingsTab(QWidget):
     # Public helpers
     # ------------------------------------------------------------------
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._refresh_profiles()
+
     def set_core_proxy(self, proxy: Any) -> None:
         """Update the Core Service proxy (called when service becomes available).
 
@@ -1903,3 +2208,4 @@ class SettingsTab(QWidget):
         self._refresh_app_rule_status()
         self._refresh_schedule_status()
         self._refresh_activities()
+        self._refresh_profiles()

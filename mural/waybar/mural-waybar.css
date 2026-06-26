@@ -1,0 +1,11 @@
+/* Mural Waybar module styles */
+/* Import in your Waybar style.css: @import "~/.local/share/mural/waybar/mural-waybar.css"; */
+
+#custom-mural {
+    color: inherit;
+    padding: 0 8px;
+}
+
+#custom-mural.active {
+    color: @foreground;
+}

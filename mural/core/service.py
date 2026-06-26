@@ -57,6 +57,7 @@ from mural.backend.runner import BackendRunner, WallpaperAssignment
 from mural.config import config as _cfg, DOWNLOAD_DIR
 from mural.core.playlist import Playlist, PlaylistStore
 from mural.core.monitor_manager import MonitorManager
+from mural.core.profiles import ProfileStore
 from mural.detection import detect, DetectionResult
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,30 @@ class IMuralCore:
         """
         ...
 
+    # ------------------------------------------------------------------
+    # Monitor profiles
+    # ------------------------------------------------------------------
+
+    def GetProfiles(self) -> Str:
+        """Return JSON array of all saved monitor profiles."""
+        ...
+
+    def SaveProfile(self, name: Str) -> Str:
+        """Snapshot current monitor assignments as a named profile; returns profile id."""
+        ...
+
+    def LoadProfile(self, profile_id: Str) -> Bool:
+        """Restore wallpaper assignments from a saved profile; returns True on success."""
+        ...
+
+    def DeleteProfile(self, profile_id: Str) -> Bool:
+        """Delete a saved profile by id; returns True if it existed."""
+        ...
+
+    def RenameProfile(self, profile_id: Str, new_name: Str) -> Bool:
+        """Rename an existing profile; returns True on success."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Service implementation
@@ -228,6 +253,10 @@ class MuralCoreService(IMuralCore):
         # Playlist state
         self._playlists = PlaylistStore()
         self._playlists.load()
+
+        # Profile state
+        self._profile_store = ProfileStore()
+        self._profile_store.load()
         self._tick_timer_id: int | None = None
         self._playlist_last_tick: dict[str, float] = {}      # playlist_id → epoch
         self._playlist_next_interval: dict[str, int] = {}    # playlist_id → effective minutes
@@ -1159,6 +1188,64 @@ class MuralCoreService(IMuralCore):
             self._apply_all()
 
         return True  # keep the GLib timer alive
+
+    # ------------------------------------------------------------------
+    # Monitor profile D-Bus methods
+    # ------------------------------------------------------------------
+
+    def GetProfiles(self) -> str:  # type: ignore[override]
+        return json.dumps([
+            {
+                "id": p.id,
+                "name": p.name,
+                "assignments": p.assignments,
+                "scaling": p.scaling,
+                "created_at": p.created_at,
+            }
+            for p in self._profile_store.all()
+        ])
+
+    def SaveProfile(self, name: str) -> str:  # type: ignore[override]
+        assignments = {
+            a.monitor_name: a.wallpaper
+            for a in self._monitor_manager.active_assignments()
+        }
+        scaling = {
+            a.monitor_name: a.scaling
+            for a in self._monitor_manager.active_assignments()
+        }
+        profile = self._profile_store.create(name, assignments, scaling)
+        logger.info("SaveProfile: %r → %s", name, profile.id)
+        return profile.id
+
+    def LoadProfile(self, profile_id: str) -> bool:  # type: ignore[override]
+        profile = self._profile_store.get(profile_id)
+        if not profile:
+            logger.warning("LoadProfile: profile %s not found", profile_id[:8])
+            return False
+        for monitor, path in profile.assignments.items():
+            if Path(path).exists():
+                self._monitor_manager.assign_wallpaper(monitor, path)
+                scaling = profile.scaling.get(monitor, "default")
+                self._monitor_manager.assign_scaling(monitor, scaling)
+        self._apply_all()
+        logger.info("LoadProfile: loaded %r (%s)", profile.name, profile_id[:8])
+        return True
+
+    def DeleteProfile(self, profile_id: str) -> bool:  # type: ignore[override]
+        ok = self._profile_store.delete(profile_id)
+        if ok:
+            logger.info("DeleteProfile: %s", profile_id[:8])
+        return ok
+
+    def RenameProfile(self, profile_id: str, new_name: str) -> bool:  # type: ignore[override]
+        profile = self._profile_store.get(profile_id)
+        if not profile:
+            return False
+        profile.name = new_name
+        self._profile_store.save(self._profile_store.all())
+        logger.info("RenameProfile: %s → %r", profile_id[:8], new_name)
+        return True
 
     def _discover_library_wallpapers(self) -> list[Path]:
         """Scan Steam Workshop, downloads, and extra dirs for wallpaper dirs."""

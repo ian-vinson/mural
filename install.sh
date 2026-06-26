@@ -32,12 +32,14 @@ VENV_DIR="${HOME}/.local/share/mural/venv"
 PLASMA_PLUGIN_DIR="${HOME}/.local/share/plasma/wallpapers/com.mural.wallpaper"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 
+WAYBAR_DIR="${HOME}/.local/share/mural/waybar"
+
 echo "Installing Mural ..."
 
 # ---------------------------------------------------------------------------
 # Virtual environment
 # ---------------------------------------------------------------------------
-echo "[1/6] Creating virtual environment at ${VENV_DIR} ..."
+echo "[1/7] Creating virtual environment at ${VENV_DIR} ..."
 mkdir -p "${HOME}/.local/share/mural"
 python3 -m venv --system-site-packages "${VENV_DIR}"
 VENV_PIP="${VENV_DIR}/bin/pip"
@@ -46,7 +48,7 @@ VENV_PYTHON="${VENV_DIR}/bin/python"
 # ---------------------------------------------------------------------------
 # Python dependencies
 # ---------------------------------------------------------------------------
-echo "[2/6] Installing Python dependencies into venv..."
+echo "[2/7] Installing Python dependencies into venv..."
 "${VENV_PIP}" install --quiet --upgrade pip
 "${VENV_PIP}" install --quiet -r "${SCRIPT_DIR}/requirements.txt"
 
@@ -58,7 +60,7 @@ echo "${SCRIPT_DIR}" > "${SITE_PACKAGES}/mural.pth"
 # ---------------------------------------------------------------------------
 # Entry point scripts
 # ---------------------------------------------------------------------------
-echo "[3/6] Installing entry point scripts to ${BIN_DIR} ..."
+echo "[3/7] Installing entry point scripts to ${BIN_DIR} ..."
 mkdir -p "${BIN_DIR}"
 
 cat > "${BIN_DIR}/mural" << EOF
@@ -76,7 +78,7 @@ chmod +x "${BIN_DIR}/mural-core"
 # ---------------------------------------------------------------------------
 # Plasma wallpaper plugin
 # ---------------------------------------------------------------------------
-echo "[4/6] Installing Plasma wallpaper plugin..."
+echo "[4/7] Installing Plasma wallpaper plugin..."
 mkdir -p "${PLASMA_PLUGIN_DIR}"
 cp -r "${SCRIPT_DIR}/plasma-plugin/." "${PLASMA_PLUGIN_DIR}/"
 echo "     Installed to ${PLASMA_PLUGIN_DIR}"
@@ -84,7 +86,7 @@ echo "     Installed to ${PLASMA_PLUGIN_DIR}"
 # ---------------------------------------------------------------------------
 # systemd user service
 # ---------------------------------------------------------------------------
-echo "[5/6] Installing systemd user service..."
+echo "[5/7] Installing systemd user service..."
 mkdir -p "${SYSTEMD_USER_DIR}"
 cp "${SCRIPT_DIR}/systemd/mural-core.service" "${SYSTEMD_USER_DIR}/"
 systemctl --user daemon-reload
@@ -95,10 +97,21 @@ systemctl --user enable --now mural-core.service && \
 # ---------------------------------------------------------------------------
 # Config directory
 # ---------------------------------------------------------------------------
-echo "[6/6] Creating config and data directories..."
+echo "[6/7] Creating config and data directories..."
 mkdir -p "${HOME}/.config/mural"
 mkdir -p "${HOME}/.local/share/mural/downloads"
 mkdir -p "${HOME}/.cache/mural"
+
+# ---------------------------------------------------------------------------
+# Waybar module
+# ---------------------------------------------------------------------------
+echo "[7/7] Installing Waybar module to ${WAYBAR_DIR} ..."
+mkdir -p "${WAYBAR_DIR}"
+cp "${SCRIPT_DIR}/mural/waybar/mural-waybar.py" "${WAYBAR_DIR}/"
+cp "${SCRIPT_DIR}/mural/waybar/mural-waybar.css" "${WAYBAR_DIR}/"
+chmod +x "${WAYBAR_DIR}/mural-waybar.py"
+echo "     Installed to ${WAYBAR_DIR}"
+echo "     Add to your Waybar config: see mural/waybar/README.md"
 
 # ---------------------------------------------------------------------------
 # Done
