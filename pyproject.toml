@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mural"
-version = "0.1.0-alpha"
+version = "0.2.0-alpha"
 description = "Animated wallpaper platform for Linux"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }

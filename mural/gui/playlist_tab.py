@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize, Qt, QModelIndex
+from PySide6.QtCore import QSize, Qt, QModelIndex, Signal
 from PySide6.QtGui import QIcon, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -43,10 +44,44 @@ from PySide6.QtWidgets import (
 
 from mural.gui.wallpaper_card import WallpaperInfo
 
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+
 _THUMB_W = 56
 _THUMB_H = 42
 _THUMBNAIL_NAMES = ("preview.jpg", "preview.png", "preview.gif",
                     "preview.webp", "thumbnail.jpg", "thumbnail.png")
+
+
+class _DnDList(QListWidget):
+    """QListWidget subclass that emits *items_dropped* for external file drops
+    while preserving internal-move drag-and-drop reordering."""
+
+    items_dropped = Signal(list)  # list[str] of local file paths
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasUrls():
+            paths = [
+                url.toLocalFile()
+                for url in event.mimeData().urls()
+                if url.isLocalFile()
+            ]
+            if paths:
+                self.items_dropped.emit(paths)
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
 
 
 def _load_icon(wallpaper_path: str) -> QIcon | None:
@@ -209,7 +244,7 @@ class PlaylistTab(QWidget):
         wp_layout.setContentsMargins(6, 6, 6, 6)
         wp_layout.setSpacing(6)
 
-        self._wp_list = QListWidget()
+        self._wp_list = _DnDList()
         self._wp_list.setIconSize(QSize(_THUMB_W, _THUMB_H))
         self._wp_list.setSpacing(2)
         self._wp_list.setAlternatingRowColors(True)
@@ -223,6 +258,7 @@ class PlaylistTab(QWidget):
         self._wp_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self._wp_list.currentRowChanged.connect(self._on_wp_row_changed)
         self._wp_list.model().rowsMoved.connect(self._on_wp_reordered)
+        self._wp_list.items_dropped.connect(self._on_items_dropped)
 
         # Empty-state overlay shown when the playlist has no wallpapers.
         self._wp_empty_label = QLabel(
@@ -254,6 +290,11 @@ class PlaylistTab(QWidget):
         add_wp_btn = QPushButton("+ Add Wallpaper")
         add_wp_btn.clicked.connect(self._add_wallpaper)
         wp_btn_row.addWidget(add_wp_btn)
+
+        import_btn = QPushButton("Import Images")
+        import_btn.setToolTip("Scan a folder and add all image files to this playlist")
+        import_btn.clicked.connect(self._import_images)
+        wp_btn_row.addWidget(import_btn)
 
         up_btn = QPushButton("↑")
         up_btn.setFixedWidth(32)
@@ -641,6 +682,83 @@ class PlaylistTab(QWidget):
             if pl:
                 pl.setdefault("wallpaper_paths", []).append(path)
                 pl.setdefault("item_durations", []).append(0)
+                self._update_wp_status(pl)
+                self._refresh_pl_count_badge()
+
+    def _import_images(self) -> None:
+        """Scan a directory for image files and batch-add them to the current playlist."""
+        if not self._core or not self._selected_id:
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Folder to Import Images From", str(Path.home())
+        )
+        if not folder:
+            return
+        images = sorted(
+            p for p in Path(folder).rglob("*")
+            if p.is_file() and p.suffix.lower() in _IMAGE_EXTS
+        )
+        if not images:
+            QMessageBox.information(
+                self, "No Images Found",
+                f"No image files found in:\n{folder}"
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Import Images",
+            f"Add {len(images)} image(s) from\n{folder}\nto this playlist?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        added = 0
+        for img_path in images:
+            path_str = str(img_path)
+            try:
+                ok = self._core.AddToPlaylist(self._selected_id, path_str)
+            except Exception:
+                ok = False
+            if ok:
+                self._add_wp_item(path_str, 0)
+                pl = self._get_playlist(self._selected_id)
+                if pl:
+                    pl.setdefault("wallpaper_paths", []).append(path_str)
+                    pl.setdefault("item_durations", []).append(0)
+                added += 1
+        if added:
+            pl = self._get_playlist(self._selected_id)
+            if pl:
+                self._update_wp_status(pl)
+                self._refresh_pl_count_badge()
+        self._status_label.setText(f"Imported {added} image(s)")
+
+    def _on_items_dropped(self, paths: list) -> None:
+        """Handle external file drops on the wallpaper list."""
+        if not self._core or not self._selected_id:
+            return
+        added = 0
+        for path_str in paths:
+            p = Path(path_str)
+            if not p.exists():
+                continue
+            # Accept both image files and directories (wallpaper packages)
+            if p.is_file() and p.suffix.lower() not in _IMAGE_EXTS:
+                continue
+            try:
+                ok = self._core.AddToPlaylist(self._selected_id, path_str)
+            except Exception:
+                ok = False
+            if ok:
+                self._add_wp_item(path_str, 0)
+                pl = self._get_playlist(self._selected_id)
+                if pl:
+                    pl.setdefault("wallpaper_paths", []).append(path_str)
+                    pl.setdefault("item_durations", []).append(0)
+                added += 1
+        if added:
+            pl = self._get_playlist(self._selected_id)
+            if pl:
                 self._update_wp_status(pl)
                 self._refresh_pl_count_badge()
 

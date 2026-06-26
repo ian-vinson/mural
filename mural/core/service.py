@@ -178,6 +178,10 @@ class IMuralCore:
         """Return current MPRIS media info as JSON string, or empty string if nothing is playing."""
         ...
 
+    def GetActivities(self) -> Str:
+        """Return JSON array [{id, name}] of KDE activities, or '[]' on non-Plasma desktops."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Service implementation
@@ -186,7 +190,7 @@ class IMuralCore:
 class MuralCoreService(IMuralCore):
     """Implementation of the Mural Core D-Bus service."""
 
-    VERSION = "0.1.0-alpha"
+    VERSION = "0.2.0-alpha"
 
     # Steam Workshop search roots for the library fallback.
     _STEAM_ROOTS = (
@@ -238,6 +242,11 @@ class MuralCoreService(IMuralCore):
         self._current_media_json: str = ""
         self._last_media_key: str = ""
 
+        # D-Bus signal subscriptions (ScreenSaver + ActivityManager)
+        self._gio_conn = None
+        self._screensaver_sub_id: int | None = None
+        self._activity_sub_id: int | None = None
+
         _cfg.load()
         if discovery.binary_found:
             self._runner = BackendRunner(
@@ -286,6 +295,7 @@ class MuralCoreService(IMuralCore):
         self._app_timer_id = GLib.timeout_add_seconds(10, self._on_app_rule_tick)
         self._start_schedule_timer()
         self._mpris_timer_id = GLib.timeout_add_seconds(5, self._on_mpris_tick)
+        self._subscribe_system_signals()
 
     def shutdown(self) -> None:
         """Stop all timers and the lwe subprocess."""
@@ -300,6 +310,7 @@ class MuralCoreService(IMuralCore):
         if self._mpris_timer_id is not None:
             GLib.source_remove(self._mpris_timer_id)
             self._mpris_timer_id = None
+        self._unsubscribe_system_signals()
         if self._runner and self._runner.is_running():
             logger.info("Stopping lwe subprocess")
             self._runner.stop()
@@ -671,6 +682,219 @@ class MuralCoreService(IMuralCore):
 
     def GetNowPlaying(self) -> str:  # type: ignore[override]
         return self._current_media_json
+
+    def GetActivities(self) -> str:  # type: ignore[override]
+        """Return JSON array [{id, name}] of KDE activities, or '[]'."""
+        if self._detection.desktop != "plasma":
+            return "[]"
+        try:
+            import gi
+            gi.require_version("Gio", "2.0")
+            from gi.repository import Gio, GLib as _GLib  # noqa: PLC0415
+
+            conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            res = conn.call_sync(
+                "org.kde.ActivityManager",
+                "/ActivityManager/Activities",
+                "org.kde.ActivityManager.Activities",
+                "ListActivities",
+                None,
+                _GLib.VariantType.new("(as)"),
+                Gio.DBusCallFlags.NONE,
+                2000,
+                None,
+            )
+            ids: list[str] = list(res.get_child_value(0).unpack())
+            activities: list[dict] = []
+            for act_id in ids:
+                try:
+                    name_res = conn.call_sync(
+                        "org.kde.ActivityManager",
+                        "/ActivityManager/Activities",
+                        "org.kde.ActivityManager.Activities",
+                        "ActivityName",
+                        _GLib.Variant("(s)", (act_id,)),
+                        _GLib.VariantType.new("(s)"),
+                        Gio.DBusCallFlags.NONE,
+                        2000,
+                        None,
+                    )
+                    name = str(name_res.get_child_value(0).unpack())
+                except Exception:
+                    name = act_id
+                activities.append({"id": act_id, "name": name})
+            return json.dumps(activities)
+        except Exception as exc:
+            logger.debug("GetActivities error: %s", exc)
+            return "[]"
+
+    # ------------------------------------------------------------------
+    # D-Bus system signal subscriptions (ScreenSaver + ActivityManager)
+    # ------------------------------------------------------------------
+
+    def _subscribe_system_signals(self) -> None:
+        """Subscribe to org.freedesktop.ScreenSaver::ActiveChanged and
+        (on Plasma) org.kde.ActivityManager.Activities::CurrentActivityChanged."""
+        try:
+            import gi
+            gi.require_version("Gio", "2.0")
+            from gi.repository import Gio  # noqa: PLC0415
+
+            self._gio_conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+            self._screensaver_sub_id = self._gio_conn.signal_subscribe(
+                None,
+                "org.freedesktop.ScreenSaver",
+                "ActiveChanged",
+                None,
+                None,
+                Gio.DBusSignalFlags.NONE,
+                self._on_screensaver_active_changed,
+                None,
+            )
+            logger.info("Subscribed to org.freedesktop.ScreenSaver::ActiveChanged")
+
+            if self._detection.desktop == "plasma":
+                self._activity_sub_id = self._gio_conn.signal_subscribe(
+                    None,
+                    "org.kde.ActivityManager.Activities",
+                    "CurrentActivityChanged",
+                    None,
+                    None,
+                    Gio.DBusSignalFlags.NONE,
+                    self._on_activity_changed,
+                    None,
+                )
+                logger.info("Subscribed to ActivityManager::CurrentActivityChanged")
+        except Exception as exc:
+            logger.debug("_subscribe_system_signals failed: %s", exc)
+
+    def _unsubscribe_system_signals(self) -> None:
+        if self._gio_conn is None:
+            return
+        try:
+            if self._screensaver_sub_id is not None:
+                self._gio_conn.signal_unsubscribe(self._screensaver_sub_id)
+                self._screensaver_sub_id = None
+            if self._activity_sub_id is not None:
+                self._gio_conn.signal_unsubscribe(self._activity_sub_id)
+                self._activity_sub_id = None
+        except Exception as exc:
+            logger.debug("_unsubscribe_system_signals: %s", exc)
+
+    def _on_screensaver_active_changed(
+        self, connection, sender, object_path, interface_name, signal_name, parameters, user_data
+    ) -> None:
+        try:
+            active = bool(parameters.get_child_value(0).unpack())
+        except Exception:
+            return
+        if active:
+            logger.info("Screen locked — triggering SDDM screenshot")
+            threading.Thread(
+                target=self._on_screen_locked, daemon=True, name="sddm-lock-shot"
+            ).start()
+
+    def _on_screen_locked(self) -> None:
+        """Capture current wallpaper as a JPEG and optionally copy to SDDM theme dir."""
+        import subprocess as _sp
+        from mural.backend.discovery import find_lwe_binary
+
+        binary = find_lwe_binary()
+        if not binary:
+            logger.debug("sddm-lock: lwe binary not found")
+            return
+
+        monitors = self.GetMonitors()
+        wallpaper = self.GetCurrentWallpaper(monitors[0]) if monitors else ""
+        if not wallpaper:
+            logger.debug("sddm-lock: no wallpaper active")
+            return
+
+        output_dir = Path("~/.local/share/mural").expanduser()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "sddm_lock.jpg"
+
+        try:
+            result = _sp.run(
+                [
+                    str(binary),
+                    "--screenshot", str(output_path),
+                    "--screenshot-delay", "0",
+                    "--bg", wallpaper,
+                ],
+                timeout=15,
+                capture_output=True,
+            )
+            if result.returncode != 0 or not output_path.exists():
+                logger.debug("sddm-lock: screenshot failed (rc=%d)", result.returncode)
+                return
+            logger.info("sddm-lock: screenshot saved to %s", output_path)
+        except Exception as exc:
+            logger.debug("sddm-lock: screenshot error: %s", exc)
+            return
+
+        if not bool(_cfg.get("auto_sddm_update", False)):
+            return
+
+        import configparser as _cp
+        theme = ""
+        for conf_path in (
+            Path("/etc/sddm.conf"),
+            Path("/etc/sddm.conf.d/sddm.conf"),
+            Path("/usr/lib/sddm/sddm.conf.d/sddm.conf"),
+        ):
+            if conf_path.exists():
+                try:
+                    cfg = _cp.ConfigParser()
+                    cfg.read(str(conf_path))
+                    theme = cfg.get("Theme", "Current", fallback="")
+                    if theme:
+                        break
+                except Exception:
+                    pass
+
+        if not theme:
+            logger.debug("sddm-lock: SDDM theme not detected — skipping auto-copy")
+            return
+
+        dest = Path(f"/usr/share/sddm/themes/{theme}/background.jpg")
+        try:
+            _sp.run(
+                ["pkexec", "cp", str(output_path), str(dest)],
+                timeout=30,
+                check=True,
+            )
+            logger.info("sddm-lock: updated %s via pkexec", dest)
+        except Exception as exc:
+            logger.debug("sddm-lock: pkexec copy failed: %s", exc)
+
+    def _on_activity_changed(
+        self, connection, sender, object_path, interface_name, signal_name, parameters, user_data
+    ) -> None:
+        try:
+            new_id = str(parameters.get_child_value(0).unpack())
+        except Exception:
+            return
+        if not bool(_cfg.get("activity_sync_enabled", False)):
+            return
+        logger.info("KDE activity changed → %s", new_id)
+        self._apply_activity_wallpaper(new_id)
+
+    def _apply_activity_wallpaper(self, activity_id: str) -> None:
+        """Switch wallpaper to the one assigned to *activity_id* in config."""
+        _cfg.load()
+        wallpapers: dict = dict(_cfg.get("activity_wallpapers", {}))
+        path = wallpapers.get(activity_id, "")
+        if not path or not Path(path).exists():
+            logger.debug("Activity %s: no wallpaper configured or file missing", activity_id)
+            return
+        monitors = self.GetMonitors()
+        for monitor in monitors:
+            self._monitor_manager.assign_wallpaper(monitor, path)
+        if monitors:
+            self._apply_all()
+            logger.info("Activity %s: applied %s", activity_id, Path(path).name)
 
     # ------------------------------------------------------------------
     # Power / app-rule pause management

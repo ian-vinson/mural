@@ -126,6 +126,11 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "openrgb_color_source": "dominant",
     "screensaver_enabled": False,
     "screensaver_timeout_minutes": 5,
+    "auto_sddm_update": False,
+    "fade_transition": True,
+    "fade_duration_ms": 400,
+    "activity_sync_enabled": False,
+    "activity_wallpapers": {},
     "pause_app_list": [],
     "time_schedule_enabled": False,
     "time_schedule": [
@@ -364,6 +369,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_playlist_section())
         layout.addWidget(self._build_schedule_section())
         layout.addWidget(self._build_screensaver_section())
+        layout.addWidget(self._build_activities_section())
         layout.addWidget(self._build_linux_integration_section())
         layout.addWidget(self._build_app_rules_section())
         layout.addWidget(self._build_library_section())
@@ -657,6 +663,19 @@ class SettingsTab(QWidget):
 
         self._disable_parallax_chk = QCheckBox("Disable parallax depth effect")
         form.addRow("Parallax:", self._disable_parallax_chk)
+
+        self._fade_transition_chk = QCheckBox("Fade transition when switching wallpapers")
+        form.addRow("Fade:", self._fade_transition_chk)
+
+        fade_dur_row = QHBoxLayout()
+        self._fade_duration_spin = QSpinBox()
+        self._fade_duration_spin.setRange(50, 2000)
+        self._fade_duration_spin.setValue(400)
+        self._fade_duration_spin.setSuffix(" ms")
+        self._fade_duration_spin.setFixedWidth(90)
+        fade_dur_row.addWidget(self._fade_duration_spin)
+        fade_dur_row.addStretch()
+        form.addRow("Duration:", fade_dur_row)
 
         return box
 
@@ -966,6 +985,137 @@ class SettingsTab(QWidget):
             self._sched_status_label.setStyleSheet("font-size: 11px; color: #888;")
 
     # ------------------------------------------------------------------
+    # KDE Activities section
+    # ------------------------------------------------------------------
+
+    def _build_activities_section(self) -> QGroupBox:
+        box = QGroupBox("KDE Activities")
+        outer = QVBoxLayout(box)
+        outer.setSpacing(8)
+
+        self._activity_sync_chk = QCheckBox(
+            "Switch wallpaper when KDE activity changes"
+        )
+        outer.addWidget(self._activity_sync_chk)
+
+        self._activities_container = QWidget()
+        self._activities_layout = QVBoxLayout(self._activities_container)
+        self._activities_layout.setContentsMargins(0, 0, 0, 0)
+        self._activities_layout.setSpacing(4)
+        outer.addWidget(self._activities_container)
+
+        self._activity_rows: list[dict] = []
+
+        refresh_btn = QPushButton("Refresh activities")
+        refresh_btn.setFixedHeight(26)
+        refresh_btn.clicked.connect(self._refresh_activities)
+        outer.addWidget(refresh_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self._activities_status_label = QLabel(
+            "KDE Activities integration — requires KDE Plasma desktop"
+        )
+        self._activities_status_label.setWordWrap(True)
+        self._activities_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        outer.addWidget(self._activities_status_label)
+
+        return box
+
+    def _refresh_activities(self) -> None:
+        """Query GetActivities() and rebuild per-activity wallpaper picker rows."""
+        if not self._core:
+            self._activities_status_label.setText("Core Service not connected")
+            return
+        try:
+            raw = self._core.GetActivities()
+            activities: list[dict] = json.loads(raw) if raw else []
+        except Exception as exc:
+            self._activities_status_label.setText(f"GetActivities error: {exc}")
+            return
+
+        # Preserve existing wallpaper selections
+        existing: dict[str, str] = {
+            row["activity_id"]: row.get("path", "") for row in self._activity_rows
+        }
+
+        # Clear rows
+        for row in self._activity_rows:
+            w = row.get("widget")
+            if w:
+                w.setParent(None)  # type: ignore[call-arg]
+        self._activity_rows.clear()
+
+        # Also take from current settings
+        saved_wallpapers: dict[str, str] = self._settings.get("activity_wallpapers", {})
+
+        for act in activities:
+            act_id = act.get("id", "")
+            act_name = act.get("name", act_id)
+            path = existing.get(act_id) or saved_wallpapers.get(act_id, "")
+
+            row: dict = {"activity_id": act_id, "path": path}
+            h = QHBoxLayout()
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+
+            lbl = QLabel(act_name)
+            lbl.setFixedWidth(120)
+            lbl.setStyleSheet("font-size: 11px;")
+            h.addWidget(lbl)
+
+            path_lbl = QLabel(Path(path).name if path else "(not set)")
+            path_lbl.setStyleSheet("font-size: 11px; color: #888;" if not path else "font-size: 11px;")
+            path_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            row["path_label"] = path_lbl
+            h.addWidget(path_lbl, 1)
+
+            pick_btn = QPushButton("Pick…")
+            pick_btn.setFixedHeight(24)
+            pick_btn.setFixedWidth(48)
+            pick_btn.clicked.connect(
+                lambda _c=False, r=row: self._pick_activity_wallpaper(r)
+            )
+            h.addWidget(pick_btn)
+
+            clear_btn = QPushButton("×")
+            clear_btn.setFixedSize(24, 24)
+            clear_btn.clicked.connect(
+                lambda _c=False, r=row: self._set_activity_path(r, "")
+            )
+            h.addWidget(clear_btn)
+
+            container = QWidget()
+            container.setLayout(h)
+            row["widget"] = container
+            self._activities_layout.addWidget(container)
+            self._activity_rows.append(row)
+
+        if activities:
+            self._activities_status_label.setText(
+                f"{len(activities)} activit{'y' if len(activities)==1 else 'ies'} found"
+            )
+            self._activities_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
+        else:
+            self._activities_status_label.setText("No KDE activities found — is KDE Plasma running?")
+            self._activities_status_label.setStyleSheet("font-size: 11px; color: #888;")
+
+    def _pick_activity_wallpaper(self, row: dict) -> None:
+        dlg = _WallpaperPickerDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            path = dlg.get_selected_path()
+            if path:
+                self._set_activity_path(row, path)
+
+    def _set_activity_path(self, row: dict, path: str) -> None:
+        row["path"] = path
+        lbl: QLabel = row["path_label"]
+        if path:
+            lbl.setText(Path(path).name)
+            lbl.setStyleSheet("font-size: 11px;")
+        else:
+            lbl.setText("(not set)")
+            lbl.setStyleSheet("font-size: 11px; color: #888;")
+
+    # ------------------------------------------------------------------
     # Linux Integration section
     # ------------------------------------------------------------------
 
@@ -1109,6 +1259,11 @@ class SettingsTab(QWidget):
         self._screensaver_timeout_spin.setSuffix(" min")
         self._screensaver_timeout_spin.setFixedWidth(90)
         form.addRow("Delay:", self._screensaver_timeout_spin)
+
+        self._auto_sddm_update_chk = QCheckBox(
+            "Auto-update SDDM background when screen locks (requires pkexec)"
+        )
+        form.addRow("", self._auto_sddm_update_chk)
 
         btn_row = QHBoxLayout()
         install_btn = QPushButton("Install KDE Screensaver")
@@ -1548,6 +1703,10 @@ class SettingsTab(QWidget):
             self._openrgb_color_source_combo.setCurrentIndex(rgb_idx)
         self._screensaver_enabled_chk.setChecked(s.get("screensaver_enabled", False))
         self._screensaver_timeout_spin.setValue(s.get("screensaver_timeout_minutes", 5))
+        self._auto_sddm_update_chk.setChecked(s.get("auto_sddm_update", False))
+        self._fade_transition_chk.setChecked(s.get("fade_transition", True))
+        self._fade_duration_spin.setValue(s.get("fade_duration_ms", 400))
+        self._activity_sync_chk.setChecked(s.get("activity_sync_enabled", False))
         self._app_list_edit.setPlainText(
             "\n".join(s.get("pause_app_list", []))
         )
@@ -1628,6 +1787,15 @@ class SettingsTab(QWidget):
             "openrgb_color_source": self._openrgb_color_source_combo.currentText(),
             "screensaver_enabled": self._screensaver_enabled_chk.isChecked(),
             "screensaver_timeout_minutes": self._screensaver_timeout_spin.value(),
+            "auto_sddm_update": self._auto_sddm_update_chk.isChecked(),
+            "fade_transition": self._fade_transition_chk.isChecked(),
+            "fade_duration_ms": self._fade_duration_spin.value(),
+            "activity_sync_enabled": self._activity_sync_chk.isChecked(),
+            "activity_wallpapers": {
+                row["activity_id"]: row.get("path", "")
+                for row in self._activity_rows
+                if row.get("path")
+            },
             "pause_app_list": pause_app_list,
             "time_schedule_enabled": self._sched_enabled_chk.isChecked(),
             "time_schedule": schedule,
@@ -1693,3 +1861,4 @@ class SettingsTab(QWidget):
         self._refresh_battery_status()
         self._refresh_app_rule_status()
         self._refresh_schedule_status()
+        self._refresh_activities()

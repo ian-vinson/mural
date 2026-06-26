@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 logger = logging.getLogger(__name__)
 
 APP_NAME = "Mural"
-APP_VERSION = "0.1.0-alpha"
+APP_VERSION = "0.2.0-alpha"
 DBUS_SERVICE_NAME = "com.mural.Core"
 DBUS_OBJECT_PATH = "/com/mural/Core"
 

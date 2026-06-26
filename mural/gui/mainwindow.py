@@ -82,6 +82,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mural.gui.fade_overlay import FadeOverlay
 from mural.gui.library_tab import LibraryTab
 from mural.gui.platform_tab import PlatformTab
 from mural.gui.playlist_tab import PlaylistTab
@@ -159,6 +160,8 @@ class _PreviewPanel(QWidget):
         self._np_timer.timeout.connect(self._refresh_now_playing)
         if core_proxy is not None:
             self._np_timer.start()
+
+        self._fade_overlay = FadeOverlay()
 
     # ------------------------------------------------------------------
     # Construction
@@ -888,14 +891,28 @@ class _PreviewPanel(QWidget):
 
         self._kill_preview()
         scaling = self._scaling_combo.currentText()
-        try:
-            ok = self._core.SetWallpaper(monitor, self._current_info.path, scaling)
-            if not ok:
-                QMessageBox.warning(self, "Apply Failed",
-                                    "The Core Service could not apply the wallpaper.\n"
-                                    "Check that linux-wallpaperengine is installed.")
-        except Exception as exc:
-            QMessageBox.critical(self, "D-Bus Error", str(exc))
+
+        from mural.gui.settings_tab import _load_settings as _ls
+        _st = _ls()
+        fade_enabled = bool(_st.get("fade_transition", True))
+        fade_ms = int(_st.get("fade_duration_ms", 400))
+
+        path = self._current_info.path
+
+        def _do_set() -> None:
+            try:
+                ok = self._core.SetWallpaper(monitor, path, scaling)
+                if not ok:
+                    QMessageBox.warning(self, "Apply Failed",
+                                        "The Core Service could not apply the wallpaper.\n"
+                                        "Check that linux-wallpaperengine is installed.")
+            except Exception as exc:
+                QMessageBox.critical(self, "D-Bus Error", str(exc))
+
+        if fade_enabled:
+            self._fade_overlay.do_transition(duration_ms=fade_ms, on_peak=_do_set)
+        else:
+            _do_set()
 
     def _on_download(self) -> None:
         """Delegate download to the platform tab."""
