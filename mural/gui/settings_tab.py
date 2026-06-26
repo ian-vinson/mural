@@ -32,6 +32,7 @@ to the Core Service immediately via D-Bus when Save is clicked.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -48,6 +49,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -143,6 +145,9 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "on_display_sleep": "stop",
     "video_loop_default": "loop",
     "process_priority": "normal",
+    "pause_on_vram_exhausted": False,
+    "vram_threshold_mb": 256,
+    "video_hwaccel": "auto",
     "time_schedule_enabled": False,
     "time_schedule": [
         {"slot": "morning",   "time": "06:00", "path": ""},
@@ -385,6 +390,7 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_app_rules_section())
         layout.addWidget(self._build_library_section())
         layout.addWidget(self._build_autostart_section())
+        layout.addWidget(self._build_hotkeys_section())
         self._dev_section = self._build_developer_section()
         self._dev_section.hide()
         layout.addWidget(self._dev_section)
@@ -1014,6 +1020,41 @@ class SettingsTab(QWidget):
         prio_note = QLabel("Lower priority reduces Mural's impact on game and app performance.")
         prio_note.setStyleSheet("font-size: 11px; color: #888;")
         layout.addWidget(prio_note)
+
+        # GPU Memory / VRAM exhaustion pause
+        self._pause_on_vram_chk = QCheckBox("Pause when VRAM is low")
+        layout.addWidget(self._pause_on_vram_chk)
+
+        vram_threshold_row = QHBoxLayout()
+        vram_threshold_row.addSpacing(20)
+        vram_threshold_row.addWidget(QLabel("Free VRAM threshold:"))
+        self._vram_threshold_spin = QSpinBox()
+        self._vram_threshold_spin.setRange(64, 4096)
+        self._vram_threshold_spin.setSuffix(" MiB")
+        self._vram_threshold_spin.setFixedWidth(110)
+        vram_threshold_row.addWidget(self._vram_threshold_spin)
+        vram_threshold_row.addStretch()
+        layout.addLayout(vram_threshold_row)
+        self._pause_on_vram_chk.toggled.connect(self._vram_threshold_spin.setEnabled)
+
+        self._gpu_info_label = QLabel("GPU: click Save to detect")
+        self._gpu_info_label.setStyleSheet("font-size: 11px; color: #888;")
+        layout.addWidget(self._gpu_info_label)
+
+        # Video decoding (hardware acceleration)
+        hwaccel_row = QHBoxLayout()
+        hwaccel_row.addWidget(QLabel("Video decoding:"))
+        self._video_hwaccel_combo = QComboBox()
+        self._video_hwaccel_combo.addItem("Auto (let mpv decide)", "auto")
+        self._video_hwaccel_combo.addItem("NVDEC (NVIDIA)", "nvdec")
+        self._video_hwaccel_combo.addItem("VAAPI (Intel/AMD)", "vaapi")
+        self._video_hwaccel_combo.addItem("Disabled (software only)", "disabled")
+        hwaccel_row.addWidget(self._video_hwaccel_combo)
+        hwaccel_row.addStretch()
+        layout.addLayout(hwaccel_row)
+        hwaccel_note = QLabel("Forces the hardware video decoder used by lwe for video wallpapers.")
+        hwaccel_note.setStyleSheet("font-size: 11px; color: #888;")
+        layout.addWidget(hwaccel_note)
 
         # Advanced collapsible group
         adv_toggle = QPushButton("▶ Advanced")
@@ -2050,6 +2091,105 @@ class SettingsTab(QWidget):
         self._refresh_service_status()
         return box
 
+    # ------------------------------------------------------------------
+    # Keyboard Shortcuts section
+    # ------------------------------------------------------------------
+
+    def _build_hotkeys_section(self) -> QGroupBox:
+        box = QGroupBox("Keyboard Shortcuts (KDE)")
+        layout = QVBoxLayout(box)
+
+        is_kde = (
+            "plasma" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+            or bool(os.environ.get("KDE_FULL_SESSION"))
+        )
+        if not is_kde:
+            non_kde_note = QLabel(
+                "Global shortcuts require KDE Plasma. "
+                "On other desktops, use your compositor's key-binding tools with the commands below."
+            )
+            non_kde_note.setWordWrap(True)
+            non_kde_note.setStyleSheet("color: #888; font-size: 11px;")
+            layout.addWidget(non_kde_note)
+
+        table = QTableWidget(3, 2)
+        table.setHorizontalHeaderLabels(["Action", "CLI command"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        table.setMaximumHeight(96)
+        for row, (action, cmd) in enumerate([
+            ("Pause / Resume", "mural-cli toggle"),
+            ("Next wallpaper",  "mural-cli next"),
+            ("Random wallpaper", "mural-cli random"),
+        ]):
+            table.setItem(row, 0, QTableWidgetItem(action))
+            table.setItem(row, 1, QTableWidgetItem(cmd))
+        layout.addWidget(table)
+
+        btn_row = QHBoxLayout()
+        install_btn = QPushButton("Install KDE Shortcuts")
+        install_btn.setFixedHeight(26)
+        install_btn.clicked.connect(self._on_install_hotkeys)
+        btn_row.addWidget(install_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self._hotkeys_status_label = QLabel()
+        self._hotkeys_status_label.setStyleSheet("font-size: 11px; color: #888;")
+        layout.addWidget(self._hotkeys_status_label)
+
+        instructions = QLabel(
+            "After installing, open System Settings → Keyboard → Shortcuts → "
+            "\"Mural Wallpaper Controls\" to assign keys."
+        )
+        instructions.setWordWrap(True)
+        instructions.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(instructions)
+
+        return box
+
+    def _on_install_hotkeys(self) -> None:
+        src_dir = Path(__file__).parent.parent / "hotkeys"
+        desktop_src = src_dir / "mural-hotkeys.desktop"
+        apps_dir = Path.home() / ".local" / "share" / "applications"
+        try:
+            apps_dir.mkdir(parents=True, exist_ok=True)
+            if desktop_src.exists():
+                shutil.copy2(str(desktop_src), str(apps_dir / "mural-hotkeys.desktop"))
+            for kbuildsycoca in ("kbuildsycoca6", "kbuildsycoca5"):
+                if shutil.which(kbuildsycoca):
+                    subprocess.run(
+                        [kbuildsycoca, "--noincremental"],
+                        capture_output=True, timeout=10,
+                    )
+                    break
+            self._hotkeys_status_label.setText(
+                "Installed. Open System Settings → Keyboard → Shortcuts to assign keys."
+            )
+            self._hotkeys_status_label.setStyleSheet("font-size: 11px; color: #4CAF50;")
+        except Exception as exc:
+            self._hotkeys_status_label.setText(f"Install failed: {exc}")
+            self._hotkeys_status_label.setStyleSheet("font-size: 11px; color: #FF5252;")
+
+    def _refresh_gpu_info(self) -> None:
+        try:
+            from mural.utils.gpu_monitor import get_gpu_memory
+            info = get_gpu_memory()
+            if info:
+                self._gpu_info_label.setText(
+                    f"GPU ({info.vendor.upper()}): {info.used_mb} / {info.total_mb} MiB used"
+                    f"  ({info.free_mb} MiB free)"
+                )
+            else:
+                self._gpu_info_label.setText(
+                    "GPU: not detected (nvidia-smi / rocm-smi not found)"
+                )
+        except Exception:
+            self._gpu_info_label.setText("GPU: query failed")
+
     def _refresh_service_status(self) -> None:
         """Update the service status label."""
         enabled = _service_is_enabled()
@@ -2156,6 +2296,14 @@ class SettingsTab(QWidget):
         prio_idx = self._process_priority_combo.findData(prio)
         if prio_idx >= 0:
             self._process_priority_combo.setCurrentIndex(prio_idx)
+        vram_pause = bool(s.get("pause_on_vram_exhausted", False))
+        self._pause_on_vram_chk.setChecked(vram_pause)
+        self._vram_threshold_spin.setValue(s.get("vram_threshold_mb", 256))
+        self._vram_threshold_spin.setEnabled(vram_pause)
+        hwaccel = s.get("video_hwaccel", "auto")
+        hwaccel_idx = self._video_hwaccel_combo.findData(hwaccel)
+        if hwaccel_idx >= 0:
+            self._video_hwaccel_combo.setCurrentIndex(hwaccel_idx)
         self._activity_sync_chk.setChecked(s.get("activity_sync_enabled", False))
         self._app_list_edit.setPlainText(
             "\n".join(s.get("pause_app_list", []))
@@ -2247,6 +2395,9 @@ class SettingsTab(QWidget):
             "video_loop_default": self._video_loop_default_combo.currentData(),
             "fullscreen_pause": self._on_app_fullscreen_combo.currentData() != "keep",
             "process_priority": self._process_priority_combo.currentData(),
+            "pause_on_vram_exhausted": self._pause_on_vram_chk.isChecked(),
+            "vram_threshold_mb": self._vram_threshold_spin.value(),
+            "video_hwaccel": self._video_hwaccel_combo.currentData(),
             "activity_sync_enabled": self._activity_sync_chk.isChecked(),
             "activity_wallpapers": {
                 row["activity_id"]: row.get("path", "")
@@ -2308,6 +2459,7 @@ class SettingsTab(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._refresh_profiles()
+        self._refresh_gpu_info()
 
     def set_core_proxy(self, proxy: Any) -> None:
         """Update the Core Service proxy (called when service becomes available).

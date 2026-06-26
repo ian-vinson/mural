@@ -1,0 +1,18 @@
+[Desktop Entry]
+Name=Mural Wallpaper Controls
+Comment=Control the Mural animated wallpaper service
+Type=Application
+NoDisplay=true
+X-KDE-GlobalShortcut=true
+
+[Desktop Action pause-resume]
+Name=Pause/Resume Wallpaper
+Exec=mural-cli toggle
+
+[Desktop Action next]
+Name=Next Wallpaper
+Exec=mural-cli next
+
+[Desktop Action random]
+Name=Random Wallpaper
+Exec=mural-cli random

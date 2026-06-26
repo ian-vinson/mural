@@ -95,6 +95,22 @@ class IMuralCore:
         """Pause (``False``) or resume (``True``) wallpaper rendering."""
         ...
 
+    def TogglePause(self) -> Bool:
+        """Toggle pause/resume; returns ``True`` if now paused, ``False`` if now running."""
+        ...
+
+    def GetGpuMemory(self) -> Str:
+        """Return JSON {total_mb, used_mb, free_mb, vendor} or ``'{}'`` if unavailable."""
+        ...
+
+    def NextWallpaper(self) -> Bool:
+        """Apply the next wallpaper from the library to all monitors; returns True on success."""
+        ...
+
+    def RandomWallpaper(self) -> Bool:
+        """Apply a random library wallpaper to all monitors; returns True on success."""
+        ...
+
     def GetStatus(self) -> Dict[Str, Variant]:
         """Return a status snapshot dict (keys: running, pid, monitors, ...)."""
         ...
@@ -311,6 +327,7 @@ class MuralCoreService(IMuralCore):
                 fade_duration_ms=int(_cfg.get("fade_duration_ms", 400)),
                 transition_mode=str(_cfg.get("transition_mode", "auto")),
                 process_priority=str(_cfg.get("process_priority", "normal")),
+                video_hwaccel=str(_cfg.get("video_hwaccel", "auto")),
             )
 
     # ------------------------------------------------------------------
@@ -406,6 +423,70 @@ class MuralCoreService(IMuralCore):
         else:
             self._runner.stop()
 
+    def TogglePause(self) -> bool:  # type: ignore[override]
+        if "manual" in self._pause_reasons:
+            self._pause_reasons.discard("manual")
+            if not self._pause_reasons:
+                self._apply_all()
+            logger.info("TogglePause → resumed")
+            return False
+        else:
+            if self._runner and self._runner.is_running():
+                self._runner.stop()
+            self._pause_reasons.add("manual")
+            logger.info("TogglePause → paused")
+            return True
+
+    def GetGpuMemory(self) -> str:  # type: ignore[override]
+        try:
+            from mural.utils.gpu_monitor import get_gpu_memory
+            info = get_gpu_memory()
+            if info is None:
+                return "{}"
+            return json.dumps({
+                "total_mb": info.total_mb,
+                "used_mb": info.used_mb,
+                "free_mb": info.free_mb,
+                "vendor": info.vendor,
+            })
+        except Exception:
+            return "{}"
+
+    def NextWallpaper(self) -> bool:  # type: ignore[override]
+        wallpapers = sorted(self._discover_library_wallpapers(), key=lambda p: p.name.lower())
+        if not wallpapers:
+            return False
+        monitors = self.GetMonitors()
+        if not monitors:
+            return False
+        current = self.GetCurrentWallpaper(monitors[0])
+        current_paths = [str(w) for w in wallpapers]
+        try:
+            idx = current_paths.index(current)
+            next_path = str(wallpapers[(idx + 1) % len(wallpapers)])
+        except ValueError:
+            next_path = str(wallpapers[0])
+        ok = False
+        for monitor in monitors:
+            ok = self.SetWallpaper(monitor, next_path) or ok
+        return ok
+
+    def RandomWallpaper(self) -> bool:  # type: ignore[override]
+        import random
+        wallpapers = self._discover_library_wallpapers()
+        if not wallpapers:
+            return False
+        monitors = self.GetMonitors()
+        if not monitors:
+            return False
+        current = self.GetCurrentWallpaper(monitors[0])
+        candidates = [w for w in wallpapers if str(w) != current]
+        pick = random.choice(candidates if candidates else wallpapers)  # noqa: S311
+        ok = False
+        for monitor in monitors:
+            ok = self.SetWallpaper(monitor, str(pick)) or ok
+        return ok
+
     def GetStatus(self) -> dict[str, Any]:  # type: ignore[override]
         running = bool(self._runner and self._runner.is_running())
         pid = (self._runner.pid or 0) if self._runner else 0
@@ -462,6 +543,7 @@ class MuralCoreService(IMuralCore):
                 fade_duration_ms=int(_cfg.get("fade_duration_ms", 400)),
                 transition_mode=str(_cfg.get("transition_mode", "auto")),
                 process_priority=str(_cfg.get("process_priority", "normal")),
+                video_hwaccel=str(_cfg.get("video_hwaccel", "auto")),
             )
         self._update_tick_timer()
         # Re-evaluate pause conditions and schedule with updated config.
@@ -1133,7 +1215,31 @@ class MuralCoreService(IMuralCore):
 
     def _on_battery_tick(self) -> bool:
         self._check_battery_pause()
+        self._check_vram_pause()
         return True
+
+    def _check_vram_pause(self) -> None:
+        """Add/remove 'vram' from _pause_reasons based on free VRAM and config."""
+        if not bool(_cfg.get("pause_on_vram_exhausted", False)):
+            if "vram" in self._pause_reasons:
+                self._pause_reasons.discard("vram")
+            return
+        threshold_mb = int(_cfg.get("vram_threshold_mb", 256))
+        try:
+            from mural.utils.gpu_monitor import is_vram_exhausted
+            exhausted = is_vram_exhausted(threshold_mb)
+        except Exception:
+            return
+        if exhausted and "vram" not in self._pause_reasons:
+            self._pause_reasons.add("vram")
+            if self._runner and self._runner.is_running():
+                self._runner.stop()
+            logger.info("VRAM low (<=%d MiB free) — paused lwe", threshold_mb)
+        elif not exhausted and "vram" in self._pause_reasons:
+            self._pause_reasons.discard("vram")
+            if not self._pause_reasons:
+                self._apply_all()
+            logger.info("VRAM available — resumed lwe")
 
     def _on_app_rule_tick(self) -> bool:
         self._check_app_rule_pause()

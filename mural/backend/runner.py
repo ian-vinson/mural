@@ -152,6 +152,7 @@ class BackendRunner:
         fade_duration_ms: int = 400,
         transition_mode: str = "auto",
         process_priority: str = "normal",
+        video_hwaccel: str = "auto",
     ) -> None:
         self._binary = Path(binary_path)
         self._assets = Path(assets_path) if assets_path else None
@@ -178,6 +179,7 @@ class BackendRunner:
         self._fade_duration_ms = fade_duration_ms
         self._transition_mode = transition_mode
         self._process_priority = process_priority
+        self._video_hwaccel = video_hwaccel
 
         self._process: subprocess.Popen[bytes] | None = None
         self._assignments: list[WallpaperAssignment] = []
@@ -354,6 +356,7 @@ class BackendRunner:
         fade_duration_ms: int = 400,
         transition_mode: str = "auto",
         process_priority: str = "normal",
+        video_hwaccel: str = "auto",
     ) -> None:
         """Update playback settings and restart lwe if it is running."""
         self._fps_limit = fps_limit
@@ -375,6 +378,7 @@ class BackendRunner:
         self._fade_duration_ms = fade_duration_ms
         self._transition_mode = transition_mode
         self._process_priority = process_priority
+        self._video_hwaccel = video_hwaccel
         if self.is_running():
             self.restart()
 
@@ -435,6 +439,11 @@ class BackendRunner:
             cmd += ["--clamping", self._clamping]
         if self._render_debug:
             cmd += ["--render-debug", self._render_debug_type]
+
+        if self._video_hwaccel == "disabled":
+            cmd += ["--set-property", "hwdec=no"]
+        elif self._video_hwaccel in ("vaapi", "nvdec"):
+            cmd += ["--set-property", f"hwdec={self._video_hwaccel}"]
 
         # Screen assignments — span mode vs per-monitor mode
         if self._screen_span and len(assignments) > 1:

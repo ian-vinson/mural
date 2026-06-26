@@ -59,6 +59,29 @@ def cmd_resume(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_toggle(_args: argparse.Namespace) -> int:
+    proxy = _get_proxy()
+    now_paused = bool(proxy.TogglePause())
+    print("Wallpaper rendering paused." if now_paused else "Wallpaper rendering resumed.")
+    return 0
+
+
+def cmd_next(_args: argparse.Namespace) -> int:
+    proxy = _get_proxy()
+    ok = bool(proxy.NextWallpaper())
+    if not ok:
+        print("Failed — no library wallpapers found.", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def cmd_random(_args: argparse.Namespace) -> int:
+    proxy = _get_proxy()
+    ok = bool(proxy.RandomWallpaper())
+    if not ok:
+        print("Failed — no library wallpapers found.", file=sys.stderr)
+    return 0 if ok else 1
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     proxy = _get_proxy()
     status = proxy.GetStatus()
@@ -290,9 +313,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_get = sub.add_parser("get", help="Get current wallpaper on a monitor")
     p_get.add_argument("monitor", nargs="?", help="Monitor name; shows all if omitted")
 
-    # pause / resume
+    # pause / resume / toggle
     sub.add_parser("pause", help="Pause wallpaper rendering")
     sub.add_parser("resume", help="Resume wallpaper rendering")
+    sub.add_parser("toggle", help="Toggle pause/resume")
+    sub.add_parser("next", help="Switch to the next wallpaper in the library")
+    sub.add_parser("random", help="Switch to a random wallpaper from the library")
 
     # status
     sub.add_parser("status", help="Show Core Service status")
@@ -353,6 +379,9 @@ def main(argv: list[str] | None = None) -> None:
         "get": cmd_get,
         "pause": cmd_pause,
         "resume": cmd_resume,
+        "toggle": cmd_toggle,
+        "next": cmd_next,
+        "random": cmd_random,
         "status": cmd_status,
         "monitors": cmd_monitors,
         "palette": cmd_palette,
