@@ -1,0 +1,603 @@
+MURAL - DEVGUIDE.txt
+====================
+Developer Guide — Mural v0.2.0-alpha Architecture Reference
+
+This document covers the full technical architecture, module layout,
+key design decisions, and known hard problems. Written for a developer
+picking this up with Claude Code or working independently.
+
+Read README.md first for product context.
+
+---
+
+TECHNOLOGY DECISIONS
+--------------------
+
+GUI Framework:     Python 3.11+ / PySide6
+                   Chosen for development speed, Claude Code compatibility,
+                   and existing reference GUIs in the lwe ecosystem.
+
+Rendering Backend: linux-wallpaperengine (C++, GPL v3)
+                   Used as a managed subprocess. Not rewritten.
+                   https://github.com/Almamu/linux-wallpaperengine
+
+Session Service:   Python process running as systemd user service
+                   Manages wallpaper lifecycle independently of GUI.
+                   Exposes D-Bus interface: org.mural.Core
+
+IPC:               D-Bus (dasbus library)
+                   GUI is a thin client. Service runs headlessly.
+                   All wallpaper control goes through D-Bus methods.
+
+DE Integration:    KDE Plasma 6 wallpaper plugin (QML)
+                   Installed to ~/.local/share/plasma/wallpapers/
+                   Other DEs via lwe's --screen-root (Wayland layer-shell)
+
+Theming:           pywal (optional) + matugen (optional)
+                   Palette extracted via Pillow, exported to
+                   ~/.cache/mural/current_palette.json
+
+RGB Sync:          OpenRGB SDK protocol v3 (TCP, port 6742)
+                   Minimal socket client in mural/utils/openrgb.py
+
+Packaging (v1):    AUR (PKGBUILD) — mural-git
+Packaging (v2):    Flatpak via io.qt.PySide.BaseApp
+
+License:           GPL v3 (application), MIT (content platform API)
+
+---
+
+REPOSITORY STRUCTURE (current)
+--------------------------------
+
+mural/
+├── README.md                   # User-facing readme
+├── DEVGUIDE.txt                # This file
+├── CHANGELOG.md                # Version history
+├── LICENSE                     # GPL v3
+├── pyproject.toml              # Python packaging (hatchling)
+├── requirements.txt            # Production Python deps
+├── requirements-dev.txt        # Dev deps (pytest, black, ruff, mypy)
+├── install.sh                  # Manual install script (creates venv)
+├── PKGBUILD                    # AUR package definition
+├── .SRCINFO                    # AUR metadata (generated from PKGBUILD)
+│
+├── mural/                      # Main Python package
+│   ├── __init__.py             # __version__ = "0.2.0-alpha"
+│   ├── main.py                 # Entry point: launches GUI + service
+│   ├── cli.py                  # mural-cli entry point
+│   ├── config.py               # ~/.config/mural/config.json management
+│   ├── detection.py            # DE/compositor auto-detection
+│   │
+│   ├── gui/
+│   │   ├── mainwindow.py       # MainWindow + _PreviewPanel
+│   │   ├── library_tab.py      # Library browser + _CardGrid
+│   │   ├── platform_tab.py     # Mural platform tab (stub)
+│   │   ├── playlist_tab.py     # Playlist editor
+│   │   ├── settings_tab.py     # Settings UI (all sections)
+│   │   ├── wallpaper_card.py   # WallpaperCard widget + WallpaperInfo dataclass
+│   │   └── fade_overlay.py     # Fullscreen fade widget for transitions
+│   │
+│   ├── core/
+│   │   ├── service.py          # D-Bus service (IMuralCore + MuralCoreService)
+│   │   ├── monitor_manager.py  # Monitor detection + assignment storage
+│   │   ├── playlist.py         # Playlist + PlaylistStore
+│   │   └── profiles.py         # MonitorProfile + ProfileStore
+│   │
+│   ├── backend/
+│   │   ├── runner.py           # BackendRunner: lwe subprocess lifecycle
+│   │   └── discovery.py        # Find lwe binary + Wallpaper Engine assets
+│   │
+│   ├── utils/
+│   │   ├── palette.py          # extract_palette(), apply_pywal(), apply_matugen()
+│   │   ├── properties.py       # Parse project.json properties, load/save overrides
+│   │   ├── thumbnail_gen.py    # lwe --screenshot thumbnail generation
+│   │   ├── openrgb.py          # OpenRGB SDK TCP client
+│   │   ├── mpris.py            # MPRIS2 D-Bus media query
+│   │   ├── hyprland.py         # Hyprland IPC Unix socket client
+│   │   ├── matugen.py          # matugen CLI wrapper
+│   │   └── gpu_monitor.py      # nvidia-smi / rocm-smi VRAM polling
+│   │
+│   ├── waybar/
+│   │   ├── mural-waybar.py     # Waybar custom module script
+│   │   ├── mural-waybar.css    # Waybar CSS for the module
+│   │   └── README.md           # Waybar setup instructions
+│   │
+│   └── platform/               # Mural content platform client
+│       ├── client.py
+│       ├── models.py
+│       └── cache.py
+│
+├── plasma-plugin/              # KDE Plasma 6 wallpaper plugin
+│   ├── metadata.json
+│   └── contents/ui/main.qml
+│
+├── systemd/
+│   └── mural-core.service      # systemd user unit
+│
+├── platform/                   # Mural content platform server (FastAPI)
+│   ├── main.py
+│   ├── models.py
+│   ├── routes/
+│   └── storage.py
+│
+└── tests/
+    ├── test_detection.py
+    ├── test_backend.py
+    └── test_platform_client.py
+
+---
+
+CORE ARCHITECTURE
+-----------------
+
+D-BUS INTERFACE (org.mural.Core at /org/mural/Core)
+
+The service exposes these method groups:
+
+  Wallpaper control:
+    SetWallpaper(monitor, path, scaling) -> bool
+    GetCurrentWallpaper(monitor) -> str
+    GetMonitors() -> str (JSON)
+    GetStatus() -> str
+
+  Settings:
+    ApplySettings(json_str) -> bool
+    GetSettings() -> str
+
+  Playlists:
+    CreatePlaylist(name) -> str (id)
+    DeletePlaylist(id) -> bool
+    GetPlaylists() -> str (JSON)
+    AddToPlaylist(id, path) -> bool
+    RemoveFromPlaylist(id, index) -> bool
+    ReorderPlaylist(id, from, to) -> bool
+    AssignPlaylistToMonitor(id, monitor) -> bool
+    SetPlaylistShuffle(id, shuffle) -> bool
+    GetPlaylistStatus() -> str
+
+  Profiles:
+    SaveProfile(name) -> str (id)
+    LoadProfile(id) -> bool
+    GetProfiles() -> str (JSON)
+    DeleteProfile(id) -> bool
+
+  System state:
+    GetNowPlaying() -> str (JSON)
+    GetGpuMemory() -> str (JSON)
+    GetPowerStatus() -> str
+    GetAppRuleStatus() -> str
+    GetScheduleStatus() -> str
+    GetActivities() -> str (JSON)
+    CaptureSddmScreenshot() -> bool
+    TogglePause() -> bool
+
+BACKENDRUNNER (mural/backend/runner.py)
+
+  Key design: one lwe process manages ALL monitors simultaneously.
+  lwe accepts multiple --screen-root/--bg pairs in a single invocation.
+  This is what keeps multi-monitor sync perfect — same process, same frame.
+
+  Transition modes:
+    sequential (KDE default): kill old → 300ms sleep → start new
+    overlap (Hyprland): start new → 600ms wait → SIGTERM old → 100ms sleep
+    auto: detects KDE via XDG_CURRENT_DESKTOP, uses sequential on KDE
+
+  Command building (_build_command):
+    1. Base: lwe binary + --assets-dir
+    2. Per-monitor: --scaling X --screen-root Y --bg Z (for each monitor)
+    3. Global flags: --fps, --silent, --volume, --no-fullscreen-pause, etc.
+    4. Per-wallpaper overrides from wallpaper_properties.json:
+       --set-property key=value (speed/rate, flip, custom props)
+    5. Extra props from runner._extra_props dict
+
+  Crash recovery:
+    _monitor_process() thread watches lwe returncode
+    On unexpected exit: exponential backoff (1s, 2s, 4s, 8s, 16s)
+    On intentional stop (_intentional_stop=True): no restart
+    After 5 crashes: gives up, logs error
+
+PAUSE REASON SYSTEM (mural/core/service.py)
+
+  self._pause_reasons: set[str]
+  
+  Possible reasons:
+    "battery"     — psutil reports on battery + pause_on_battery=True
+    "app:name"    — process in pause_app_list is running
+    "focus"       — on_app_focused=pause/stop and KWin reports non-Mural focus
+    "maximize"    — on_app_maximized=pause/stop and window fills screen
+    "vram"        — free VRAM < vram_threshold_mb
+    "sleep"       — PrepareForSleep signal received
+    "manual"      — TogglePause() called by user/CLI
+
+  lwe only runs when pause_reasons is empty.
+  Resume only happens when ALL pause reasons are cleared.
+
+WALLPAPER PROPERTIES (mural/utils/properties.py)
+
+  Each wallpaper's project.json contains a general.properties dict.
+  Properties have types: bool, slider, color, combolist, text.
+  
+  User overrides stored in:
+    ~/.config/mural/wallpaper_properties.json
+    {
+      "/path/to/wallpaper": {
+        "speed": "0.5",
+        "scaling": "fill",
+        "flip_h": "1",
+        "loop_mode": "no_loop",
+        "rain": "0",
+        "bloom": "1"
+      }
+    }
+  
+  Passed to lwe as: --set-property key=value
+  Speed/rate is a common scene property controlling animation speed.
+
+COLOR PALETTE (mural/utils/palette.py)
+
+  extract_palette(image_path, n=6) -> list[str]
+    Uses Pillow quantize (FASTOCTREE method) on a 150x150 thumbnail.
+    Returns HEX strings: ["#1a1a2e", "#2d1b5e", ...]
+  
+  apply_pywal(image_path) -> bool
+    Runs: wal --backend wal -i {path} -n
+    -n = don't set wallpaper (Mural handles that)
+  
+  apply_matugen(image_path) -> bool
+    Runs: matugen image {path}
+  
+  Exported to: ~/.cache/mural/current_palette.json
+    {"colors": [...], "wallpaper": "...", "name": "..."}
+
+LINUX INTEGRATIONS
+
+  pywal (mural/utils/palette.py):
+    Triggered in SetWallpaper() after lwe starts.
+    Source: "primary" = only on primary monitor change.
+    Source: "last" = on any monitor change.
+
+  matugen (mural/utils/matugen.py):
+    Same trigger pattern as pywal.
+    Runs: matugen image {preview_path}
+
+  Hyprland IPC (mural/utils/hyprland.py):
+    Unix socket: $XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock
+    Sends: keyword general:col.active_border rgba(rrggbbff)
+    Only active when HYPRLAND_INSTANCE_SIGNATURE is set.
+
+  OpenRGB (mural/utils/openrgb.py):
+    TCP to localhost:6742 (OpenRGB SDK Server).
+    Sends NET_PACKET_ID_SET_ALL_LEDS with dominant palette color.
+    Only active when OpenRGB is running.
+
+  MPRIS (mural/utils/mpris.py):
+    Queries org.mpris.MediaPlayer2.* on session D-Bus.
+    Polled every 5s in service, exposed via GetNowPlaying().
+    Shown in preview panel below color swatches.
+
+  SDDM (service.py):
+    Subscribes to org.freedesktop.ScreenSaver::ActiveChanged.
+    On lock: runs lwe --screenshot → ~/.local/share/mural/sddm_lock.jpg
+    Detects SDDM theme background path from /etc/sddm.conf.
+    Uses pkexec cp to update (polkit dialog for privilege).
+
+  GPU monitor (mural/utils/gpu_monitor.py):
+    nvidia-smi --query-gpu=memory.total,memory.used,memory.free
+    or rocm-smi --showmeminfo vram --json
+    Polled every 60s, pauses lwe if free < vram_threshold_mb.
+
+WAYBAR MODULE (mural/waybar/mural-waybar.py)
+
+  Standalone Python script, no Mural imports needed.
+  Reads ~/.cache/mural/current_palette.json (written on every wallpaper change).
+  Outputs Waybar JSON: text (dot + name), tooltip (all swatches + path).
+  Install path: ~/.local/share/mural/waybar/mural-waybar.py
+
+MURAL CLI (mural/cli.py)
+
+  Connects to running mural-core service via D-Bus.
+  Exit code 0 on success, 1 if service not running.
+  
+  Key commands:
+    mural-cli set <path> [--monitor X] [--scaling Y]
+    mural-cli toggle                    # pause/resume
+    mural-cli next / random             # playlist / random from library
+    mural-cli palette [--format hex]    # print current colors
+    mural-cli profile save/load/list    # monitor profiles
+    mural-cli hyprland-sync             # manual Hyprland color push
+    mural-cli openrgb-sync              # manual OpenRGB color push
+
+  Installed as console_script entry point via pyproject.toml.
+  Useful in Hyprland bind= rules and shell scripts.
+
+---
+
+KNOWN HARD PROBLEMS
+--------------------
+
+1. KWin surface scan lines on wallpaper switch
+   KWin holds the last rendered frame buffer briefly after lwe exits.
+   SOLUTION IMPLEMENTED: Sequential mode on KDE (kill old first, 300ms
+   wait, start new). Fade overlay covers the gap when enabled.
+   Transition mode is user-configurable: Auto / Sequential / Overlap.
+
+2. lwe scene compatibility gaps
+   Some wallpapers use features not yet in lwe:
+   - genericimage4 shader (fixed: use /assets subdir for --assets-dir)
+   - solidlayer.json model type (upstream lwe issue)
+   - Newer particle types, HDR rendering
+   SOLUTION: Capture lwe stderr, display compatibility errors clearly.
+   Mural shows "incompatible wallpaper" rather than silently failing.
+
+3. Global rendering quality settings (anti-aliasing, shadows, etc.)
+   WE exposes these as application-level renderer settings.
+   lwe has NO command-line flags for AA, shadow quality, reflections.
+   SOLUTION: Not implemented. Requires upstream lwe C++ changes.
+   Workaround: --disable-particles, --fps cap, per-wallpaper property overrides.
+
+4. Steam symlink duplication
+   ~/.steam/steam/ is a symlink to ~/.local/share/Steam/
+   Both paths are valid, causing every wallpaper to appear twice.
+   SOLUTION IMPLEMENTED: Path.resolve() before dedup at both the
+   root path level and individual wallpaper path level.
+
+5. Wayland display env vars in systemd service
+   WAYLAND_DISPLAY and DISPLAY are not inherited by user services.
+   SOLUTION IMPLEMENTED: runner.py copies env vars explicitly to
+   lwe subprocess. Service unit has PassEnvironment for display vars.
+   XDG_SESSION_TYPE "unspecified" is overridden to "wayland" when
+   WAYLAND_DISPLAY is set.
+
+6. Python 3.14 + dasbus annotation incompatibility
+   from __future__ import annotations makes dasbus's @dbus_interface
+   decorator fail (can't resolve string annotations at class definition).
+   SOLUTION IMPLEMENTED: Removed from __future__ import annotations
+   from service.py. Dasbus requires real type objects at decoration time.
+
+7. GI (PyGObject) in venv
+   gi is a system package (python-gobject via pacman) and cannot be
+   pip installed into a venv normally.
+   SOLUTION IMPLEMENTED: Venv created with --system-site-packages so
+   gi is visible. install.sh uses this flag.
+
+8. D-Bus name registration timing
+   Service must register on D-Bus before GUI times out (10s window).
+   SOLUTION IMPLEMENTED: Service registers immediately at startup,
+   before running any discovery or heavy initialization.
+
+9. CEF / web wallpaper memory
+   lwe uses CEF for web wallpapers: ~200-300MB RAM per instance.
+   No mitigation currently. Document as known limitation.
+
+10. lwe process accumulation bug (FIXED)
+    Auto-restart backoff timer was firing during intentional stops,
+    spawning one extra lwe per wallpaper switch.
+    SOLUTION IMPLEMENTED: _intentional_stop flag + psutil pre-spawn
+    guard kills any orphaned lwe before starting new one.
+
+---
+
+DEVELOPMENT SETUP
+-----------------
+
+Prerequisites:
+  - CachyOS, Arch, or Manjaro
+  - KDE Plasma 6
+  - Python 3.11+
+  - linux-wallpaperengine-git (paru -S linux-wallpaperengine-git)
+  - python-gobject (sudo pacman -S python-gobject)
+  - Git
+
+Clone and setup:
+  git clone https://github.com/ian-vinson/mural.git
+  cd mural
+  python -m venv --system-site-packages .venv
+  source .venv/bin/activate.fish    # or activate for bash
+  pip install -r requirements-dev.txt
+
+Run the GUI (dev mode, no systemd):
+  python -m mural.main
+
+Run the core service manually with debug output:
+  python -m mural.core.service --debug
+
+Run tests:
+  pytest tests/
+  # All 60 tests should pass
+
+Check D-Bus methods directly:
+  python3 -c "
+  from dasbus.connection import SessionMessageBus
+  bus = SessionMessageBus()
+  proxy = bus.get_proxy('org.mural.Core', '/org/mural/Core')
+  print(proxy.GetMonitors())
+  print(proxy.GetStatus())
+  "
+
+Test mural-cli:
+  mural-cli status
+  mural-cli monitors
+  mural-cli palette
+
+Install for local testing (full install):
+  ./install.sh
+  mural
+
+Reinstall after changes:
+  systemctl --user stop mural-core.service
+  rm -rf ~/.local/share/mural/venv
+  ./install.sh
+
+---
+
+DEPENDENCIES
+------------
+
+Production (requirements.txt):
+  PySide6>=6.6.0          GUI framework
+  dasbus>=1.7             D-Bus IPC (Python)
+  requests>=2.31.0        HTTP client
+  Pillow>=10.0.0          Image processing + palette extraction
+  psutil>=5.9.0           Process management + battery detection
+  watchdog>=3.0.0         File system watching
+
+System (pacman, not pip):
+  python-gobject          gi.repository — required for GLib/D-Bus
+  linux-wallpaperengine   Rendering backend (AUR: linux-wallpaperengine-git)
+
+Optional (pacman or AUR):
+  python-pywal            pywal color scheme integration
+  matugen                 Material You theming
+  openrgb                 RGB hardware sync
+
+Development (requirements-dev.txt):
+  pytest>=7.4.0
+  pytest-qt>=4.2.0        Qt widget testing
+  pytest-asyncio>=0.23.0
+  pytest-mock>=3.12.0
+  black>=23.0.0           Formatting
+  ruff>=0.1.0             Linting
+  mypy>=1.5.0             Type checking
+  PySide6-stubs>=6.6.0    Type stubs for PySide6
+
+---
+
+ADDING A NEW FEATURE — CHECKLIST
+----------------------------------
+
+1. Add config key with default to settings_tab.py _DEFAULTS dict
+2. Add UI control in the appropriate _build_*_section() method
+3. Add to _populate_from_settings() and _collect_settings()
+4. Add to service.py IMuralCore interface if D-Bus method needed
+5. Implement in MuralCoreService
+6. If it affects lwe command: add to runner.py _build_command()
+   or update_playback() parameter list
+7. Thread through service.py ApplySettings() → runner.update_playback()
+8. Add test in tests/
+
+---
+
+CONFIG FILE FORMAT (~/.config/mural/config.json)
+--------------------------------------------------
+
+Key config keys and their types/defaults:
+
+  # Playback
+  fps_limit: int = 30
+  mute_audio: bool = False
+  volume: int = 80
+  no_automute: bool = False
+  no_audio_processing: bool = False
+  disable_mouse: bool = False
+  disable_parallax: bool = False
+  disable_particles: bool = False
+  clamping: str = "clamp"
+  video_hwaccel: str = "auto"
+  video_loop_default: str = "loop"
+  process_priority: str = "normal"
+  
+  # Transitions
+  fade_transition: bool = True
+  fade_duration_ms: int = 400
+  transition_mode: str = "auto"
+  
+  # Pause conditions
+  on_app_focused: str = "keep"
+  on_app_maximized: str = "keep"
+  on_app_fullscreen: str = "pause"
+  fullscreen_pause: bool = True
+  fullscreen_pause_only_active: bool = False
+  fullscreen_ignore_appids: list = []
+  pause_on_battery: bool = True
+  on_display_sleep: str = "stop"
+  pause_app_list: list = []
+  pause_on_vram_exhausted: bool = False
+  vram_threshold_mb: int = 256
+  
+  # Playlist/schedule
+  playlist_interval_minutes: int = 0
+  time_schedule_enabled: bool = False
+  time_schedule: list = []
+  
+  # Linux integration
+  pywal_on_change: bool = False
+  pywal_source: str = "primary"
+  matugen_source: str = "disabled"
+  openrgb_sync: bool = False
+  openrgb_color_source: str = "dominant"
+  hyprland_sync: bool = False
+  hyprland_sync_inactive: bool = False
+  hyprland_color_source: str = "dominant"
+  show_now_playing: bool = True
+  mpris_to_wallpaper: bool = False
+  
+  # Screensaver/SDDM
+  screensaver_enabled: bool = False
+  screensaver_timeout_minutes: int = 5
+  auto_sddm_update: bool = False
+  
+  # KDE Activities
+  activity_sync_enabled: bool = False
+  activity_wallpapers: dict = {}
+
+---
+
+AUR SUBMISSION NOTES
+--------------------
+
+Package name: mural-git (tracks main branch)
+
+To update after changes:
+  1. makepkg --printsrcinfo > .SRCINFO
+  2. Push to AUR git:
+     git clone ssh://aur@aur.archlinux.org/mural-git.git aur-mural
+     cp PKGBUILD .SRCINFO aur-mural/
+     cd aur-mural
+     git add -A
+     git commit -m "Update to v0.2.0-alpha"
+     git push
+
+Test PKGBUILD locally first:
+  mkdir /tmp/mural-aur-test
+  cp PKGBUILD /tmp/mural-aur-test/
+  cd /tmp/mural-aur-test
+  makepkg -si
+
+---
+
+REFERENCE LINKS
+---------------
+linux-wallpaperengine:
+  https://github.com/Almamu/linux-wallpaperengine
+
+lwe DeepWiki (architecture docs):
+  https://deepwiki.com/Almamu/linux-wallpaperengine
+
+KDE Plasma Wallpaper Plugin API:
+  https://develop.kde.org/docs/plasma/
+
+dasbus (D-Bus library):
+  https://dasbus.readthedocs.io/
+
+pywal:
+  https://github.com/dylanaraps/pywal
+
+matugen:
+  https://github.com/InioX/matugen
+
+OpenRGB SDK:
+  https://gitlab.com/CalcProgrammer1/OpenRGB
+
+Hyprland IPC:
+  https://wiki.hyprland.org/IPC/
+
+wallpaper-engine-kde-plugin (reference):
+  https://github.com/catsout/wallpaper-engine-kde-plugin
+
+Flatpak PySide6 BaseApp:
+  https://github.com/flathub/io.qt.PySide.BaseApp
+
+---
+
+END OF DEVGUIDE.txt
