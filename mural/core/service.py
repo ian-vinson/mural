@@ -238,9 +238,19 @@ class MuralCoreService(IMuralCore):
                 auto_restart=True,
                 fps_limit=int(_cfg.get("fps_limit", 30)),
                 mute_audio=bool(_cfg.get("mute_audio", False)),
+                volume=int(_cfg.get("volume", 80)),
+                no_automute=bool(_cfg.get("no_automute", False)),
+                no_audio_processing=bool(_cfg.get("no_audio_processing", False)),
                 fullscreen_pause=bool(_cfg.get("fullscreen_pause", True)),
+                fullscreen_pause_only_active=bool(_cfg.get("fullscreen_pause_only_active", False)),
+                fullscreen_ignore_appids=list(_cfg.get("fullscreen_ignore_appids", [])),
                 disable_mouse=bool(_cfg.get("disable_mouse", False)),
                 disable_parallax=bool(_cfg.get("disable_parallax", False)),
+                disable_particles=bool(_cfg.get("disable_particles", False)),
+                screen_span=bool(_cfg.get("screen_span", False)),
+                clamping=str(_cfg.get("clamping", "clamp")),
+                render_debug=bool(_cfg.get("render_debug", False)),
+                render_debug_type=str(_cfg.get("render_debug_type", "full")),
             )
 
     # ------------------------------------------------------------------
@@ -344,16 +354,41 @@ class MuralCoreService(IMuralCore):
         _cfg.load()
         fps_limit = int(_cfg.get("fps_limit", 30))
         mute_audio = bool(_cfg.get("mute_audio", False))
+        volume = int(_cfg.get("volume", 80))
+        no_automute = bool(_cfg.get("no_automute", False))
+        no_audio_processing = bool(_cfg.get("no_audio_processing", False))
         fullscreen_pause = bool(_cfg.get("fullscreen_pause", True))
+        fullscreen_pause_only_active = bool(_cfg.get("fullscreen_pause_only_active", False))
+        fullscreen_ignore_appids = list(_cfg.get("fullscreen_ignore_appids", []))
         disable_mouse = bool(_cfg.get("disable_mouse", False))
         disable_parallax = bool(_cfg.get("disable_parallax", False))
+        disable_particles = bool(_cfg.get("disable_particles", False))
+        screen_span = bool(_cfg.get("screen_span", False))
+        clamping = str(_cfg.get("clamping", "clamp"))
+        render_debug = bool(_cfg.get("render_debug", False))
+        render_debug_type = str(_cfg.get("render_debug_type", "full"))
         logger.info(
-            "ApplySettings: fps=%d mute=%s fullscreen_pause=%s disable_mouse=%s disable_parallax=%s",
-            fps_limit, mute_audio, fullscreen_pause, disable_mouse, disable_parallax,
+            "ApplySettings: fps=%d mute=%s vol=%d fullscreen_pause=%s disable_mouse=%s"
+            " disable_parallax=%s disable_particles=%s screen_span=%s clamping=%s"
+            " render_debug=%s",
+            fps_limit, mute_audio, volume, fullscreen_pause, disable_mouse,
+            disable_parallax, disable_particles, screen_span, clamping, render_debug,
         )
         if self._runner:
             self._runner.update_playback(
-                fps_limit, mute_audio, fullscreen_pause, disable_mouse, disable_parallax
+                fps_limit, mute_audio, fullscreen_pause,
+                disable_mouse=disable_mouse,
+                disable_parallax=disable_parallax,
+                volume=volume,
+                no_automute=no_automute,
+                no_audio_processing=no_audio_processing,
+                fullscreen_pause_only_active=fullscreen_pause_only_active,
+                fullscreen_ignore_appids=fullscreen_ignore_appids,
+                disable_particles=disable_particles,
+                screen_span=screen_span,
+                clamping=clamping,
+                render_debug=render_debug,
+                render_debug_type=render_debug_type,
             )
         self._update_tick_timer()
         # Re-evaluate pause conditions and schedule with updated config.

@@ -127,9 +127,19 @@ class BackendRunner:
         restart_grace_seconds: float = 10.0,
         fps_limit: int = 30,
         mute_audio: bool = False,
+        volume: int = 80,
+        no_automute: bool = False,
+        no_audio_processing: bool = False,
         fullscreen_pause: bool = True,
+        fullscreen_pause_only_active: bool = False,
+        fullscreen_ignore_appids: list[str] | None = None,
         disable_mouse: bool = False,
         disable_parallax: bool = False,
+        disable_particles: bool = False,
+        screen_span: bool = False,
+        clamping: str = "clamp",
+        render_debug: bool = False,
+        render_debug_type: str = "full",
     ) -> None:
         self._binary = Path(binary_path)
         self._assets = Path(assets_path) if assets_path else None
@@ -139,9 +149,19 @@ class BackendRunner:
         self._restart_grace = restart_grace_seconds
         self._fps_limit = fps_limit
         self._mute_audio = mute_audio
+        self._volume = volume
+        self._no_automute = no_automute
+        self._no_audio_processing = no_audio_processing
         self._fullscreen_pause = fullscreen_pause
+        self._fullscreen_pause_only_active = fullscreen_pause_only_active
+        self._fullscreen_ignore_appids: list[str] = fullscreen_ignore_appids or []
         self._disable_mouse = disable_mouse
         self._disable_parallax = disable_parallax
+        self._disable_particles = disable_particles
+        self._screen_span = screen_span
+        self._clamping = clamping
+        self._render_debug = render_debug
+        self._render_debug_type = render_debug_type
 
         self._process: subprocess.Popen[bytes] | None = None
         self._assignments: list[WallpaperAssignment] = []
@@ -227,21 +247,33 @@ class BackendRunner:
         fullscreen_pause: bool,
         disable_mouse: bool = False,
         disable_parallax: bool = False,
+        volume: int = 80,
+        no_automute: bool = False,
+        no_audio_processing: bool = False,
+        fullscreen_pause_only_active: bool = False,
+        fullscreen_ignore_appids: list[str] | None = None,
+        disable_particles: bool = False,
+        screen_span: bool = False,
+        clamping: str = "clamp",
+        render_debug: bool = False,
+        render_debug_type: str = "full",
     ) -> None:
-        """Update playback settings and restart lwe if it is running.
-
-        Args:
-            fps_limit: Target frame rate cap; 0 = unlimited.
-            mute_audio: Pass ``--silent`` to lwe when ``True``.
-            fullscreen_pause: When ``False``, pass ``--no-fullscreen-pause``.
-            disable_mouse: When ``True``, pass ``--disable-mouse``.
-            disable_parallax: When ``True``, pass ``--disable-parallax``.
-        """
+        """Update playback settings and restart lwe if it is running."""
         self._fps_limit = fps_limit
         self._mute_audio = mute_audio
+        self._volume = volume
+        self._no_automute = no_automute
+        self._no_audio_processing = no_audio_processing
         self._fullscreen_pause = fullscreen_pause
+        self._fullscreen_pause_only_active = fullscreen_pause_only_active
+        self._fullscreen_ignore_appids = fullscreen_ignore_appids or []
         self._disable_mouse = disable_mouse
         self._disable_parallax = disable_parallax
+        self._disable_particles = disable_particles
+        self._screen_span = screen_span
+        self._clamping = clamping
+        self._render_debug = render_debug
+        self._render_debug_type = render_debug_type
         if self.is_running():
             self.restart()
 
@@ -270,19 +302,50 @@ class BackendRunner:
 
         if self._fps_limit > 0:
             cmd += ["--fps", str(self._fps_limit)]
+
+        # Audio
         if self._mute_audio:
             cmd.append("--silent")
-        if not self._fullscreen_pause:
+        else:
+            if self._volume != 100:
+                cmd += ["--volume", str(self._volume)]
+        if self._no_automute:
+            cmd.append("--noautomute")
+        if self._no_audio_processing:
+            cmd.append("--no-audio-processing")
+
+        # Fullscreen pause
+        if self._fullscreen_pause:
+            if self._fullscreen_pause_only_active:
+                cmd.append("--fullscreen-pause-only-active")
+            for appid in self._fullscreen_ignore_appids:
+                if appid.strip():
+                    cmd += ["--fullscreen-pause-ignore-appid", appid.strip()]
+        else:
             cmd.append("--no-fullscreen-pause")
+
         if self._disable_mouse:
             cmd.append("--disable-mouse")
         if self._disable_parallax:
             cmd.append("--disable-parallax")
+        if self._disable_particles:
+            cmd.append("--disable-particles")
+        if self._clamping and self._clamping != "clamp":
+            cmd += ["--clamping", self._clamping]
+        if self._render_debug:
+            cmd += ["--render-debug", self._render_debug_type]
 
-        for assignment in assignments:
-            if assignment.scaling and assignment.scaling != "default":
-                cmd += ["--scaling", assignment.scaling]
-            cmd += ["--screen-root", assignment.monitor, "--bg", assignment.wallpaper]
+        # Screen assignments — span mode vs per-monitor mode
+        if self._screen_span and len(assignments) > 1:
+            monitors_str = ",".join(a.monitor for a in assignments)
+            if assignments[0].scaling and assignments[0].scaling != "default":
+                cmd += ["--scaling", assignments[0].scaling]
+            cmd += ["--screen-span", monitors_str, "--bg", assignments[0].wallpaper]
+        else:
+            for assignment in assignments:
+                if assignment.scaling and assignment.scaling != "default":
+                    cmd += ["--scaling", assignment.scaling]
+                cmd += ["--screen-root", assignment.monitor, "--bg", assignment.wallpaper]
 
         for assignment in assignments:
             for key, value in load_overrides(assignment.wallpaper).items():

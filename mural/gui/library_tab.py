@@ -303,6 +303,31 @@ def _detect_steam_workshop_paths() -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
+# Background thumbnail generation worker
+# ---------------------------------------------------------------------------
+
+class _ThumbnailGenWorker(QThread):
+    """Generates thumbnails for wallpapers that have no preview image.
+
+    Runs lwe --screenshot in a background thread for each candidate.
+    Emits ``thumbnail_ready(wallpaper_path, thumbnail_path)`` on success.
+    """
+
+    thumbnail_ready: ClassVar[Signal] = Signal(str, str)
+
+    def __init__(self, candidates: list[tuple[str, str]], lwe_binary: str) -> None:
+        super().__init__()
+        self._candidates = candidates
+        self._lwe_binary = lwe_binary
+
+    def run(self) -> None:
+        from mural.utils.thumbnail_gen import generate_thumbnail
+        for wallpaper_path, out_path in self._candidates:
+            if generate_thumbnail(self._lwe_binary, wallpaper_path, out_path):
+                self.thumbnail_ready.emit(wallpaper_path, out_path)
+
+
+# ---------------------------------------------------------------------------
 # Responsive card grid
 # ---------------------------------------------------------------------------
 
@@ -432,9 +457,11 @@ class LibraryTab(QWidget):
         self._active_tags: set[str] = set()
         self._tag_buttons: dict[str, QPushButton] = {}
         self._scan_worker: _LibraryScanWorker | None = None
+        self._thumb_worker: _ThumbnailGenWorker | None = None
         self._extra_dirs: list[Path] = []
         self._scanning: bool = False
         self._seen_paths: set[str] = set()
+        self._path_to_card: dict[str, WallpaperCard] = {}
 
         self._build_ui()
         self._start_scan()
@@ -569,6 +596,7 @@ class LibraryTab(QWidget):
         self._grid.clear_cards()
         self._all_infos.clear()
         self._visible_cards.clear()
+        self._path_to_card.clear()
         self._selected_card = None
         self._active_tags.clear()
         self._tag_buttons.clear()
@@ -603,6 +631,45 @@ class LibraryTab(QWidget):
         self._progress.hide()
         self._rebuild_tag_row()
         self._update_status()
+        self._start_thumbnail_generation()
+
+    def _start_thumbnail_generation(self) -> None:
+        """Start a background thread to generate thumbnails for wallpapers that lack one."""
+        from mural.backend.discovery import find_lwe_binary
+        from mural.utils.thumbnail_gen import thumbnail_cache_path
+
+        binary = find_lwe_binary()
+        if not binary:
+            return
+
+        candidates: list[tuple[str, str]] = []
+        for info in self._all_infos:
+            if info.thumbnail_path:
+                continue
+            out = thumbnail_cache_path(info.path)
+            if not out.exists():
+                candidates.append((info.path, str(out)))
+
+        if not candidates:
+            return
+
+        if self._thumb_worker and self._thumb_worker.isRunning():
+            self._thumb_worker.quit()
+
+        self._thumb_worker = _ThumbnailGenWorker(candidates, str(binary))
+        self._thumb_worker.thumbnail_ready.connect(self._on_thumbnail_ready)
+        self._thumb_worker.start(priority=self._thumb_worker.Priority.LowestPriority)
+
+    def _on_thumbnail_ready(self, wallpaper_path: str, thumbnail_path: str) -> None:
+        """Update the card for *wallpaper_path* with the newly generated thumbnail."""
+        card = self._path_to_card.get(wallpaper_path)
+        if card is None:
+            return
+        from PySide6.QtGui import QPixmap
+        px = QPixmap(thumbnail_path)
+        if not px.isNull():
+            card.set_thumbnail(px)
+        card.info.thumbnail_path = thumbnail_path
 
     # ------------------------------------------------------------------
     # Filtering
@@ -748,6 +815,7 @@ class LibraryTab(QWidget):
         card.add_to_playlist_requested.connect(self.add_to_playlist_requested)
         self._grid.add_card(card)
         self._visible_cards.append(card)
+        self._path_to_card[info.path] = card
 
     def _on_card_selected(self, info: WallpaperInfo) -> None:
         """Update selection state and forward the signal."""

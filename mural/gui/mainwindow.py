@@ -147,6 +147,7 @@ class _PreviewPanel(QWidget):
         self._current_props: list = []
         self._prop_widgets: list = []
         self._props_expanded: bool = False
+        self._preview_proc: subprocess.Popen | None = None
 
         self.setMinimumWidth(_PREVIEW_MIN_W)
         self.setMaximumWidth(_PREVIEW_MAX_W)
@@ -230,6 +231,18 @@ class _PreviewPanel(QWidget):
         layout.addWidget(self._props_section)
 
         layout.addStretch()
+
+        # Preview button
+        self._preview_btn = QPushButton("▶ Preview")
+        self._preview_btn.setFixedHeight(30)
+        self._preview_btn.setEnabled(False)
+        self._preview_btn.setStyleSheet(
+            "QPushButton { border: 1px solid #555; border-radius: 4px; background: transparent; }"
+            "QPushButton:hover { border-color: #888; background: #2a2a2a; }"
+            "QPushButton:disabled { color: #555; border-color: #333; }"
+        )
+        self._preview_btn.clicked.connect(self._on_preview_clicked)
+        layout.addWidget(self._preview_btn)
 
         # Separator
         sep = QFrame()
@@ -333,6 +346,7 @@ class _PreviewPanel(QWidget):
             info: The selected :class:`~mural.gui.wallpaper_card.WallpaperInfo`.
         """
         self._current_info = info
+        self._kill_preview()
 
         # Thumbnail
         if info.thumbnail_path and Path(info.thumbnail_path).exists():
@@ -364,6 +378,7 @@ class _PreviewPanel(QWidget):
         self._download_btn.setVisible(is_platform)
         self._open_btn.setVisible(not is_platform)
         self._apply_btn.setEnabled(True)
+        self._preview_btn.setEnabled(True)
 
         self._refresh_monitor_list()
 
@@ -401,12 +416,47 @@ class _PreviewPanel(QWidget):
                     self._desc_label):
             lbl.setText("")
         self._apply_btn.setEnabled(False)
+        self._preview_btn.setEnabled(False)
         self._download_btn.hide()
         self._open_btn.hide()
         self._colors_row.hide()
         self._current_palette = []
         self._props_section.hide()
         self._current_props = []
+
+    def _kill_preview(self) -> None:
+        """Terminate a running lwe preview process, if any."""
+        if self._preview_proc and self._preview_proc.poll() is None:
+            try:
+                self._preview_proc.kill()
+            except OSError:
+                pass
+        self._preview_proc = None
+
+    def _on_preview_clicked(self) -> None:
+        """Launch lwe in windowed mode to preview the selected wallpaper."""
+        if not self._current_info:
+            return
+        self._kill_preview()
+        from mural.backend.discovery import find_lwe_binary
+        binary = find_lwe_binary()
+        if not binary:
+            QMessageBox.warning(self, "Not Found",
+                                "linux-wallpaperengine binary not found.")
+            return
+        try:
+            self._preview_proc = subprocess.Popen([
+                str(binary),
+                "--window", "0x0x1280x720",
+                self._current_info.path,
+            ])
+        except OSError as exc:
+            QMessageBox.critical(self, "Preview Error", str(exc))
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """Kill preview process on panel destruction."""
+        self._kill_preview()
+        super().closeEvent(event)
 
     def _refresh_monitor_list(self) -> None:
         """Re-populate the monitor combo from the Core Service."""
@@ -733,6 +783,7 @@ class _PreviewPanel(QWidget):
             )
             return
 
+        self._kill_preview()
         scaling = self._scaling_combo.currentText()
         try:
             ok = self._core.SetWallpaper(monitor, self._current_info.path, scaling)
@@ -992,6 +1043,15 @@ class MainWindow(QMainWindow):
 
         # Settings saved → propagate to service and preview panel.
         self._settings_tab.settings_saved.connect(self._on_settings_saved)
+
+        # Developer mode toggle: Ctrl+Shift+D
+        from PySide6.QtGui import QShortcut
+        dev_shortcut = QShortcut(QKeySequence("Ctrl+Shift+D"), self)
+        dev_shortcut.activated.connect(self._on_toggle_dev_mode)
+
+    def _on_toggle_dev_mode(self) -> None:
+        """Toggle the hidden Developer section in Settings."""
+        self._settings_tab.toggle_dev_mode()
 
     # ------------------------------------------------------------------
     # Tab switching

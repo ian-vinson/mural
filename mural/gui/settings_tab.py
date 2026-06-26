@@ -40,6 +40,7 @@ from typing import Any
 from PySide6.QtCore import Qt, QTime, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -48,8 +49,10 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
@@ -62,9 +65,18 @@ from PySide6.QtWidgets import (
 )
 
 _POWER_PRESETS = {
-    "Gaming":  {"fps_limit": 0,  "mute_audio": False, "fullscreen_pause": True, "quality_profile": "High"},
-    "Work":    {"fps_limit": 30, "mute_audio": False, "fullscreen_pause": True, "quality_profile": "Medium"},
-    "Battery": {"fps_limit": 15, "mute_audio": True,  "fullscreen_pause": True, "quality_profile": "Low"},
+    "Gaming":  {
+        "fps_limit": 0, "mute_audio": False, "volume": 100, "no_automute": True,
+        "disable_particles": False, "fullscreen_pause": True, "quality_profile": "High",
+    },
+    "Work":    {
+        "fps_limit": 30, "mute_audio": False, "volume": 50,
+        "disable_particles": False, "fullscreen_pause": True, "quality_profile": "Medium",
+    },
+    "Battery": {
+        "fps_limit": 15, "mute_audio": True, "disable_particles": True,
+        "fullscreen_pause": True, "no_audio_processing": True, "quality_profile": "Low",
+    },
 }
 
 _CONFIG_DIR = Path("~/.config/mural").expanduser()
@@ -89,13 +101,23 @@ _SCHEDULE_SLOTS = [
 _DEFAULT_SETTINGS: dict[str, Any] = {
     "fps_limit": 30,
     "mute_audio": False,
+    "volume": 80,
+    "no_automute": False,
+    "no_audio_processing": False,
     "pause_on_battery": True,
     "fullscreen_pause": True,
+    "fullscreen_pause_only_active": False,
+    "fullscreen_ignore_appids": [],
     "disable_mouse": False,
     "disable_parallax": False,
+    "disable_particles": False,
+    "screen_span": False,
+    "clamping": "clamp",
+    "render_debug": False,
+    "render_debug_type": "full",
     "quality_profile": "Medium",
     "autostart": True,
-    "playlist_interval_minutes": 0,   # 0 = disabled
+    "playlist_interval_minutes": 0,
     "monitor_assignments": {},
     "pywal_source": "disabled",
     "pause_app_list": [],
@@ -337,7 +359,11 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_schedule_section())
         layout.addWidget(self._build_linux_integration_section())
         layout.addWidget(self._build_app_rules_section())
+        layout.addWidget(self._build_library_section())
         layout.addWidget(self._build_autostart_section())
+        self._dev_section = self._build_developer_section()
+        self._dev_section.hide()
+        layout.addWidget(self._dev_section)
         layout.addStretch()
 
         # Save / Reset bar pinned at the bottom.
@@ -367,6 +393,12 @@ class SettingsTab(QWidget):
     def _build_monitors_section(self) -> QGroupBox:
         box = QGroupBox("Monitors")
         layout = QVBoxLayout(box)
+
+        self._screen_span_chk = QCheckBox("Span single wallpaper across all monitors")
+        layout.addWidget(self._screen_span_chk)
+        span_note = QLabel("Uses the primary monitor's wallpaper stretched across all displays")
+        span_note.setStyleSheet("font-size: 11px; color: #888; padding-left: 20px;")
+        layout.addWidget(span_note)
 
         self._monitor_table = QTableWidget(0, 4)
         self._monitor_table.setHorizontalHeaderLabels(["Output", "Current Wallpaper", "Enabled", "Playlist"])
@@ -524,9 +556,45 @@ class SettingsTab(QWidget):
         fps_row.addStretch()
         form.addRow("FPS limit:", fps_row)
 
-        self._mute_chk = QCheckBox("Mute wallpaper audio")
-        form.addRow("Audio:", self._mute_chk)
+        # Audio block
+        audio_widget = QWidget()
+        audio_layout = QVBoxLayout(audio_widget)
+        audio_layout.setContentsMargins(0, 0, 0, 0)
+        audio_layout.setSpacing(4)
 
+        self._mute_chk = QCheckBox("Mute wallpaper audio")
+        audio_layout.addWidget(self._mute_chk)
+
+        vol_row = QHBoxLayout()
+        vol_row.addWidget(QLabel("Volume:"))
+        self._volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self._volume_slider.setRange(0, 100)
+        self._volume_slider.setValue(80)
+        self._volume_slider.setFixedWidth(120)
+        vol_row.addWidget(self._volume_slider)
+        self._volume_label = QLabel("80")
+        self._volume_label.setFixedWidth(28)
+        vol_row.addWidget(self._volume_label)
+        vol_row.addStretch()
+        self._volume_slider.valueChanged.connect(
+            lambda v: self._volume_label.setText(str(v))
+        )
+        audio_layout.addLayout(vol_row)
+
+        self._no_automute_chk = QCheckBox(
+            "Don't automute when other apps play audio"
+        )
+        audio_layout.addWidget(self._no_automute_chk)
+
+        self._no_audio_processing_chk = QCheckBox(
+            "Disable audio processing (disables audio-reactive features)"
+        )
+        audio_layout.addWidget(self._no_audio_processing_chk)
+
+        self._mute_chk.toggled.connect(self._on_mute_toggled)
+        form.addRow("Audio:", audio_widget)
+
+        # Battery
         battery_row = QHBoxLayout()
         self._battery_chk = QCheckBox("Pause when on battery")
         battery_row.addWidget(self._battery_chk)
@@ -536,10 +604,46 @@ class SettingsTab(QWidget):
         battery_row.addStretch()
         form.addRow("Battery:", battery_row)
 
+        # Fullscreen pause block
+        fs_widget = QWidget()
+        fs_layout = QVBoxLayout(fs_widget)
+        fs_layout.setContentsMargins(0, 0, 0, 0)
+        fs_layout.setSpacing(4)
+
         self._fullscreen_chk = QCheckBox(
             "Pause wallpaper when a fullscreen window is detected"
         )
-        form.addRow("Fullscreen:", self._fullscreen_chk)
+        fs_layout.addWidget(self._fullscreen_chk)
+
+        self._fs_options_widget = QWidget()
+        fs_opts = QVBoxLayout(self._fs_options_widget)
+        fs_opts.setContentsMargins(16, 0, 0, 0)
+        fs_opts.setSpacing(4)
+
+        self._fs_all_radio = QRadioButton("Pause all monitors")
+        self._fs_active_radio = QRadioButton(
+            "Pause only the monitor with the fullscreen app"
+        )
+        self._fs_all_radio.setChecked(True)
+        self._fs_btn_group = QButtonGroup(self)
+        self._fs_btn_group.addButton(self._fs_all_radio)
+        self._fs_btn_group.addButton(self._fs_active_radio)
+        fs_opts.addWidget(self._fs_all_radio)
+        fs_opts.addWidget(self._fs_active_radio)
+
+        fs_opts.addWidget(QLabel("Ignore fullscreen for these Steam App IDs (one per line):"))
+        self._fs_ignore_edit = QPlainTextEdit()
+        self._fs_ignore_edit.setPlaceholderText("e.g.\n570\n730")
+        self._fs_ignore_edit.setFixedHeight(58)
+        fs_opts.addWidget(self._fs_ignore_edit)
+        hint = QLabel("Enter Steam App IDs, e.g. 570 for Dota 2")
+        hint.setStyleSheet("font-size: 11px; color: #888;")
+        fs_opts.addWidget(hint)
+
+        fs_layout.addWidget(self._fs_options_widget)
+        self._fullscreen_chk.toggled.connect(self._fs_options_widget.setEnabled)
+        self._fs_options_widget.setEnabled(False)
+        form.addRow("Fullscreen:", fs_widget)
 
         self._disable_mouse_chk = QCheckBox("Disable mouse parallax effects")
         form.addRow("Mouse:", self._disable_mouse_chk)
@@ -548,6 +652,12 @@ class SettingsTab(QWidget):
         form.addRow("Parallax:", self._disable_parallax_chk)
 
         return box
+
+    def _on_mute_toggled(self, checked: bool) -> None:
+        self._volume_slider.setEnabled(not checked)
+        self._volume_label.setEnabled(not checked)
+        self._no_automute_chk.setEnabled(not checked)
+        self._no_audio_processing_chk.setEnabled(not checked)
 
     # ------------------------------------------------------------------
     # Performance section
@@ -590,6 +700,37 @@ class SettingsTab(QWidget):
         self._quality_note.setWordWrap(True)
         layout.addWidget(self._quality_note)
 
+        self._disable_particles_chk = QCheckBox("Disable particle effects")
+        layout.addWidget(self._disable_particles_chk)
+
+        # Advanced collapsible group
+        adv_toggle = QPushButton("▶ Advanced")
+        adv_toggle.setFlat(True)
+        adv_toggle.setStyleSheet(
+            "QPushButton { font-size: 11px; color: #aaa; text-align: left;"
+            " padding: 0; border: none; background: transparent; }"
+            "QPushButton:hover { color: #ddd; }"
+        )
+        adv_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(adv_toggle)
+
+        self._adv_widget = QWidget()
+        adv_form = QFormLayout(self._adv_widget)
+        adv_form.setContentsMargins(8, 0, 0, 0)
+        adv_form.setVerticalSpacing(6)
+        self._clamping_combo = QComboBox()
+        self._clamping_combo.addItems(["clamp", "border", "repeat"])
+        adv_form.addRow("Texture clamping:", self._clamping_combo)
+        self._adv_widget.hide()
+        layout.addWidget(self._adv_widget)
+
+        def _toggle_adv() -> None:
+            visible = not self._adv_widget.isVisible()
+            self._adv_widget.setVisible(visible)
+            adv_toggle.setText(("▼" if visible else "▶") + " Advanced")
+
+        adv_toggle.clicked.connect(_toggle_adv)
+
         self._on_quality_changed(self._quality_combo.currentText())
         return box
 
@@ -597,11 +738,18 @@ class SettingsTab(QWidget):
         """Populate settings fields from a power-profile preset dict."""
         idx = self._quality_combo.findText(preset["quality_profile"])
         if idx >= 0:
-            self._quality_combo.setCurrentIndex(idx)  # triggers _on_quality_changed
-        # Override fps with the preset's actual value (profile fps ≠ preset fps for Gaming)
+            self._quality_combo.setCurrentIndex(idx)
         self._fps_spin.setValue(preset["fps_limit"])
-        self._mute_chk.setChecked(preset["mute_audio"])
-        self._fullscreen_chk.setChecked(preset["fullscreen_pause"])
+        self._mute_chk.setChecked(preset.get("mute_audio", False))
+        self._fullscreen_chk.setChecked(preset.get("fullscreen_pause", True))
+        if "volume" in preset:
+            self._volume_slider.setValue(preset["volume"])
+        if "no_automute" in preset:
+            self._no_automute_chk.setChecked(preset["no_automute"])
+        if "no_audio_processing" in preset:
+            self._no_audio_processing_chk.setChecked(preset["no_audio_processing"])
+        if "disable_particles" in preset:
+            self._disable_particles_chk.setChecked(preset["disable_particles"])
 
     def _on_quality_changed(self, name: str) -> None:
         profile = _QUALITY_PROFILES.get(name, {})
@@ -933,6 +1081,109 @@ class SettingsTab(QWidget):
             self._app_rule_status_label.setStyleSheet("font-size: 11px; color: #00C853;")
 
     # ------------------------------------------------------------------
+    # Library section
+    # ------------------------------------------------------------------
+
+    def _build_library_section(self) -> QGroupBox:
+        box = QGroupBox("Library")
+        layout = QVBoxLayout(box)
+        layout.setSpacing(6)
+
+        btn_row = QHBoxLayout()
+        gen_btn = QPushButton("Generate missing thumbnails")
+        gen_btn.setFixedHeight(28)
+        gen_btn.clicked.connect(self._on_generate_thumbnails)
+        btn_row.addWidget(gen_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self._thumb_gen_label = QLabel()
+        self._thumb_gen_label.setStyleSheet("font-size: 11px; color: #888;")
+        self._thumb_gen_label.hide()
+        layout.addWidget(self._thumb_gen_label)
+
+        return box
+
+    def _on_generate_thumbnails(self) -> None:
+        """Generate thumbnails for wallpapers that have none, in a background thread."""
+        import threading
+        from mural.backend.discovery import find_lwe_binary
+        from mural.utils.thumbnail_gen import generate_thumbnail, thumbnail_cache_path
+
+        binary = find_lwe_binary()
+        if not binary:
+            self._thumb_gen_label.setText("lwe binary not found — cannot generate thumbnails")
+            self._thumb_gen_label.show()
+            return
+
+        dirs = _scan_library_dirs()
+        candidates: list[str] = []
+        for wp_dir in dirs:
+            proj = wp_dir / "project.json"
+            if not proj.exists():
+                continue
+            for name in ("preview.jpg", "preview.png", "preview.gif", "thumbnail.jpg"):
+                if (wp_dir / name).exists():
+                    break
+            else:
+                out_path = thumbnail_cache_path(str(wp_dir))
+                if not out_path.exists():
+                    candidates.append(str(wp_dir))
+
+        if not candidates:
+            self._thumb_gen_label.setText("All wallpapers already have thumbnails.")
+            self._thumb_gen_label.show()
+            return
+
+        total = len(candidates)
+        self._thumb_gen_label.setText(f"Generating thumbnails: 0/{total}…")
+        self._thumb_gen_label.show()
+        done: list[int] = [0]
+        lwe_str = str(binary)
+
+        def _worker() -> None:
+            for path in candidates:
+                out = thumbnail_cache_path(path)
+                generate_thumbnail(lwe_str, path, str(out))
+                done[0] += 1
+                self._thumb_gen_label.setText(
+                    f"Generating thumbnails: {done[0]}/{total}…"
+                )
+            self._thumb_gen_label.setText(
+                f"Done — generated thumbnails for {done[0]} wallpaper(s)."
+            )
+
+        threading.Thread(target=_worker, daemon=True, name="thumb-gen").start()
+
+    # ------------------------------------------------------------------
+    # Developer section (hidden; toggled via Ctrl+Shift+D)
+    # ------------------------------------------------------------------
+
+    def _build_developer_section(self) -> QGroupBox:
+        box = QGroupBox("Developer")
+        form = QFormLayout(box)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
+
+        self._render_debug_chk = QCheckBox("Enable render debug output")
+        form.addRow("Render debug:", self._render_debug_chk)
+
+        self._render_debug_type_combo = QComboBox()
+        self._render_debug_type_combo.addItems(["full", "wireframe", "depth"])
+        form.addRow("Debug type:", self._render_debug_type_combo)
+
+        note = QLabel("Toggled via Ctrl+Shift+D. Restart lwe after saving.")
+        note.setStyleSheet("font-size: 11px; color: #888;")
+        form.addRow("", note)
+
+        return box
+
+    def toggle_dev_mode(self) -> None:
+        """Show or hide the Developer section (called from MainWindow)."""
+        self._dev_section.setVisible(not self._dev_section.isVisible())
+
+    # ------------------------------------------------------------------
     # Autostart section
     # ------------------------------------------------------------------
 
@@ -1009,10 +1260,32 @@ class SettingsTab(QWidget):
         s = self._settings
         self._fps_spin.setValue(s.get("fps_limit", 30))
         self._mute_chk.setChecked(s.get("mute_audio", False))
+        self._volume_slider.setValue(s.get("volume", 80))
+        self._no_automute_chk.setChecked(s.get("no_automute", False))
+        self._no_audio_processing_chk.setChecked(s.get("no_audio_processing", False))
         self._battery_chk.setChecked(s.get("pause_on_battery", True))
         self._fullscreen_chk.setChecked(s.get("fullscreen_pause", True))
+        self._fs_options_widget.setEnabled(s.get("fullscreen_pause", True))
+        if s.get("fullscreen_pause_only_active", False):
+            self._fs_active_radio.setChecked(True)
+        else:
+            self._fs_all_radio.setChecked(True)
+        self._fs_ignore_edit.setPlainText(
+            "\n".join(s.get("fullscreen_ignore_appids", []))
+        )
+        self._screen_span_chk.setChecked(s.get("screen_span", False))
         self._disable_mouse_chk.setChecked(s.get("disable_mouse", False))
         self._disable_parallax_chk.setChecked(s.get("disable_parallax", False))
+        self._disable_particles_chk.setChecked(s.get("disable_particles", False))
+        clamping = s.get("clamping", "clamp")
+        ci = self._clamping_combo.findText(clamping)
+        if ci >= 0:
+            self._clamping_combo.setCurrentIndex(ci)
+        self._render_debug_chk.setChecked(s.get("render_debug", False))
+        rd_type = s.get("render_debug_type", "full")
+        ri = self._render_debug_type_combo.findText(rd_type)
+        if ri >= 0:
+            self._render_debug_type_combo.setCurrentIndex(ri)
         self._autostart_chk.setChecked(s.get("autostart", True))
         self._playlist_spin.setValue(s.get("playlist_interval_minutes", 0))
         pywal_source = s.get("pywal_source", "disabled")
@@ -1057,6 +1330,11 @@ class SettingsTab(QWidget):
         pause_app_list = [
             line.strip() for line in raw_app_text.splitlines() if line.strip()
         ]
+        fs_ignore = [
+            line.strip()
+            for line in self._fs_ignore_edit.toPlainText().splitlines()
+            if line.strip()
+        ]
         schedule = [
             {
                 "slot": row["slot_key"],
@@ -1068,10 +1346,20 @@ class SettingsTab(QWidget):
         return {
             "fps_limit": self._fps_spin.value(),
             "mute_audio": self._mute_chk.isChecked(),
+            "volume": self._volume_slider.value(),
+            "no_automute": self._no_automute_chk.isChecked(),
+            "no_audio_processing": self._no_audio_processing_chk.isChecked(),
             "pause_on_battery": self._battery_chk.isChecked(),
             "fullscreen_pause": self._fullscreen_chk.isChecked(),
+            "fullscreen_pause_only_active": self._fs_active_radio.isChecked(),
+            "fullscreen_ignore_appids": fs_ignore,
+            "screen_span": self._screen_span_chk.isChecked(),
             "disable_mouse": self._disable_mouse_chk.isChecked(),
             "disable_parallax": self._disable_parallax_chk.isChecked(),
+            "disable_particles": self._disable_particles_chk.isChecked(),
+            "clamping": self._clamping_combo.currentText(),
+            "render_debug": self._render_debug_chk.isChecked(),
+            "render_debug_type": self._render_debug_type_combo.currentText(),
             "quality_profile": self._quality_combo.currentText(),
             "autostart": self._autostart_chk.isChecked(),
             "playlist_interval_minutes": self._playlist_spin.value(),
