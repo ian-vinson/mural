@@ -292,12 +292,24 @@ def _dir_size(path: Path) -> int:
 
 
 def _detect_steam_workshop_paths() -> list[Path]:
-    """Return any Steam Workshop wallpaper_engine content directories found."""
+    """Return Steam Workshop wallpaper_engine content directories, deduplicated by real path.
+
+    Steam installs often create ``~/.steam/steam`` as a symlink to
+    ``~/.local/share/Steam``, which would otherwise produce duplicate entries.
+    """
+    seen_real: set[Path] = set()
     results: list[Path] = []
     for root_str in _STEAM_ROOTS:
         root = Path(root_str).expanduser()
         candidate = root / "steamapps" / "workshop" / "content" / _WORKSHOP_CONTENT_ID
-        if candidate.is_dir():
+        if not candidate.is_dir():
+            continue
+        try:
+            real = candidate.resolve()
+        except OSError:
+            real = candidate
+        if real not in seen_real:
+            seen_real.add(real)
             results.append(candidate)
     return results
 
@@ -372,8 +384,14 @@ class _CardGrid(QWidget):
         self._destroy_rows()
         self._current_cols = 0
 
+    def schedule_relayout(self) -> None:
+        """Request a deferred re-flow (safe to call from outside the grid)."""
+        self._relayout_timer.stop()
+        self._relayout_timer.start()
+
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        self._relayout_timer.stop()
         self._relayout_timer.start()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
@@ -394,8 +412,18 @@ class _CardGrid(QWidget):
                 w.deleteLater()
 
     def _relayout(self) -> None:
-        """Re-flow cards into rows based on the current widget width."""
-        available = max(self.width(), _CARD_W + _CARD_SPACING)
+        """Re-flow cards into rows based on the current available width.
+
+        When the grid is inside a QScrollArea the parent is the viewport.
+        We read the *viewport* width rather than self.width() because the
+        grid's own size may still reflect the previous (wider) layout while
+        its row-widgets impose a large implicit minimum width — the scroll
+        area can't shrink us below that, so our width doesn't update until
+        after we rebuild the rows.
+        """
+        vp = self.parentWidget()
+        raw_w = vp.width() if vp is not None else self.width()
+        available = max(raw_w, _CARD_W + _CARD_SPACING)
         cols = max(2, (available + _CARD_SPACING) // (_CARD_W + _CARD_SPACING))
         self._current_cols = cols
 
@@ -461,6 +489,7 @@ class LibraryTab(QWidget):
         self._extra_dirs: list[Path] = []
         self._scanning: bool = False
         self._seen_paths: set[str] = set()
+        self._seen_real_paths: set[str] = set()
         self._path_to_card: dict[str, WallpaperCard] = {}
 
         self._build_ui()
@@ -603,6 +632,7 @@ class LibraryTab(QWidget):
         self._tag_row_widget.hide()
         self._clear_btn.hide()
         self._seen_paths.clear()
+        self._seen_real_paths.clear()
         self._scanning = True
 
         self._progress.show()
@@ -620,7 +650,14 @@ class LibraryTab(QWidget):
         """Add a discovered wallpaper to the grid (called from main thread via signal)."""
         if info.path in self._seen_paths:
             return
+        try:
+            real_path = str(Path(info.path).resolve())
+        except OSError:
+            real_path = info.path
+        if real_path in self._seen_real_paths:
+            return
         self._seen_paths.add(info.path)
+        self._seen_real_paths.add(real_path)
         self._all_infos.append(info)
         if self._matches_filter(info):
             self._add_card(info)
@@ -853,6 +890,13 @@ class LibraryTab(QWidget):
             self._status_label.setText(f"{total} wallpaper{'s' if total != 1 else ''}")
         else:
             self._status_label.setText(f"{shown} of {total} wallpapers")
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        # Trigger grid relayout when the outer container changes width (e.g. splitter
+        # moved, window un-maximized).  The grid itself may not receive a resize event
+        # if its current width exceeds the viewport width due to row-widget constraints.
+        self._grid.schedule_relayout()
 
     def refresh(self) -> None:
         """Re-scan all directories (called by the main window's refresh action)."""
