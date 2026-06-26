@@ -133,6 +133,7 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_sddm_update": False,
     "fade_transition": True,
     "fade_duration_ms": 400,
+    "transition_mode": "auto",
     "activity_sync_enabled": False,
     "activity_wallpapers": {},
     "pause_app_list": [],
@@ -879,6 +880,21 @@ class SettingsTab(QWidget):
         fade_dur_row.addWidget(self._fade_duration_spin)
         fade_dur_row.addStretch()
         form.addRow("Duration:", fade_dur_row)
+
+        self._transition_mode_combo = QComboBox()
+        self._transition_mode_combo.addItem("Auto (detect compositor)", "auto")
+        self._transition_mode_combo.addItem("Sequential (KDE / KWin)", "sequential")
+        self._transition_mode_combo.addItem("Overlap (Hyprland / non-KDE)", "overlap")
+        self._transition_mode_combo.setFixedWidth(230)
+        form.addRow("Transition mode:", self._transition_mode_combo)
+
+        transition_note = QLabel(
+            "Auto uses sequential mode on KDE to prevent surface scan-line artifacts "
+            "caused by KWin holding the previous frame buffer."
+        )
+        transition_note.setWordWrap(True)
+        transition_note.setStyleSheet("color: #888; font-size: 11px;")
+        form.addRow("", transition_note)
 
         return box
 
@@ -2048,6 +2064,10 @@ class SettingsTab(QWidget):
         self._auto_sddm_update_chk.setChecked(s.get("auto_sddm_update", False))
         self._fade_transition_chk.setChecked(s.get("fade_transition", True))
         self._fade_duration_spin.setValue(s.get("fade_duration_ms", 400))
+        tm = s.get("transition_mode", "auto")
+        tm_idx = self._transition_mode_combo.findData(tm)
+        if tm_idx >= 0:
+            self._transition_mode_combo.setCurrentIndex(tm_idx)
         self._activity_sync_chk.setChecked(s.get("activity_sync_enabled", False))
         self._app_list_edit.setPlainText(
             "\n".join(s.get("pause_app_list", []))
@@ -2132,6 +2152,7 @@ class SettingsTab(QWidget):
             "auto_sddm_update": self._auto_sddm_update_chk.isChecked(),
             "fade_transition": self._fade_transition_chk.isChecked(),
             "fade_duration_ms": self._fade_duration_spin.value(),
+            "transition_mode": self._transition_mode_combo.currentData(),
             "activity_sync_enabled": self._activity_sync_chk.isChecked(),
             "activity_wallpapers": {
                 row["activity_id"]: row.get("path", "")

@@ -307,6 +307,7 @@ class MuralCoreService(IMuralCore):
                 render_debug_type=str(_cfg.get("render_debug_type", "full")),
                 fade_transition=bool(_cfg.get("fade_transition", True)),
                 fade_duration_ms=int(_cfg.get("fade_duration_ms", 400)),
+                transition_mode=str(_cfg.get("transition_mode", "auto")),
             )
 
     # ------------------------------------------------------------------
@@ -455,6 +456,7 @@ class MuralCoreService(IMuralCore):
                 render_debug_type=render_debug_type,
                 fade_transition=bool(_cfg.get("fade_transition", True)),
                 fade_duration_ms=int(_cfg.get("fade_duration_ms", 400)),
+                transition_mode=str(_cfg.get("transition_mode", "auto")),
             )
         self._update_tick_timer()
         # Re-evaluate pause conditions and schedule with updated config.

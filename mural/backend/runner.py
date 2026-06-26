@@ -53,6 +53,14 @@ logger = logging.getLogger(__name__)
 _LWE_PROCESS_NAME = "linux-wallpaperengine"
 _SIGTERM_TIMEOUT = 3.0  # seconds to wait after SIGTERM before SIGKILL
 
+# KWin holds the last rendered frame buffer briefly after lwe exits, causing
+# the old frame to bleed through during an overlap/crossfade transition.
+# On KDE we use a sequential (kill-then-start) strategy instead.
+_IS_KDE = (
+    "plasma" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    or bool(os.environ.get("KDE_FULL_SESSION"))
+)
+
 
 def _kill_process(process: "subprocess.Popen[bytes]") -> None:
     """Terminate *process*'s process group; escalate to SIGKILL after timeout."""
@@ -142,6 +150,7 @@ class BackendRunner:
         render_debug_type: str = "full",
         fade_transition: bool = True,
         fade_duration_ms: int = 400,
+        transition_mode: str = "auto",
     ) -> None:
         self._binary = Path(binary_path)
         self._assets = Path(assets_path) if assets_path else None
@@ -166,6 +175,7 @@ class BackendRunner:
         self._render_debug_type = render_debug_type
         self._fade_transition = fade_transition
         self._fade_duration_ms = fade_duration_ms
+        self._transition_mode = transition_mode
 
         self._process: subprocess.Popen[bytes] | None = None
         self._assignments: list[WallpaperAssignment] = []
@@ -181,10 +191,25 @@ class BackendRunner:
     # Public interface
     # ------------------------------------------------------------------
 
+    def _effective_transition_mode(self) -> str:
+        """Resolve ``"auto"`` to the compositor-appropriate mode."""
+        if self._transition_mode == "auto":
+            return "sequential" if _IS_KDE else "overlap"
+        return self._transition_mode
+
     def start(self, assignments: list[WallpaperAssignment]) -> None:
         """Start lwe with the given monitor-wallpaper assignments.
 
-        If a process is already running it is stopped first.
+        If a process is already running it is stopped first using the
+        configured transition mode:
+
+        * ``"sequential"`` (default on KDE/KWin): kill old process first,
+          wait for the compositor to release the surface, then start the
+          new one.  Avoids the frame-buffer bleed-through that KWin causes
+          when two lwe processes overlap.
+        * ``"overlap"`` (default on other compositors): spawn new process
+          first, then retire the old one after a short gap so there is no
+          rendering hole between the two wallpapers.
 
         Args:
             assignments: One or more :class:`WallpaperAssignment` items.
@@ -198,35 +223,70 @@ class BackendRunner:
         if not self._binary.exists():
             raise FileNotFoundError(f"lwe binary not found: {self._binary}")
 
+        mode = self._effective_transition_mode()
+        old_process: subprocess.Popen[bytes] | None = None
+
         with self._lock:
-            old_process = (
-                self._process
-                if self._process and self._process.poll() is None
-                else None
-            )
+            if self._process and self._process.poll() is None:
+                old_process = self._process
             self._assignments = list(assignments)
             self._stop_event.clear()
-            self._intentional_stop = False
 
-            if old_process is not None:
-                # Overlap transition: spawn new lwe without stopping the old
-                # one first so there is no rendering gap. Pre-spawn guard
-                # skips old_pid to keep it alive during the handoff.
-                self._start_process(exclude_pid=old_process.pid)
-            else:
+            if old_process is None:
                 # First launch: clean up leftover orphans, then spawn.
+                self._intentional_stop = False
                 self.kill_orphans()
                 self._start_process()
+                return
 
-        if old_process is not None:
-            # Sleep outside the lock so other callers aren't blocked.
+            if mode == "sequential":
+                # Flag intentional stop so the monitor thread does not attempt
+                # an auto-restart when it sees old_process die.  Also clear
+                # self._process so the monitor thread exits cleanly on process
+                # death (its check: ``self._process is not process``).
+                self._intentional_stop = True
+                self._process = None
+            else:
+                # Overlap: spawn new lwe first while old is still running.
+                self._intentional_stop = False
+                self._start_process(exclude_pid=old_process.pid)
+
+        # ------------------------------------------------------------------
+        # Outside the lock — run the rest of the transition.
+        # ------------------------------------------------------------------
+        if mode == "sequential":
+            # KDE/KWin sequential: kill old FIRST, then start new.
+            # KWin can be slow releasing the Wayland surface, hence 2 s timeout.
+            if old_process.poll() is None:
+                old_process.send_signal(signal.SIGTERM)
+                try:
+                    old_process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    old_process.kill()
+                    old_process.wait()
+
+            # When fade_transition is active, the overlay already covers the
+            # gap — no extra sleep needed.  Without fade, wait for KWin to
+            # complete its compositor repaint cycle before starting new lwe.
+            if not self._fade_transition:
+                time.sleep(0.3)
+
+            with self._lock:
+                self._intentional_stop = False
+                self._stop_event.clear()
+                self._start_process()
+
+            logger.debug(
+                "Sequential transition: new lwe started (old pid=%d)", old_process.pid
+            )
+        else:
+            # Overlap transition (non-KDE compositors).
             if not self._fade_transition:
                 # No fade overlay: give the new process 600 ms to initialize
                 # and claim the Wayland surface before pulling the old one away.
                 time.sleep(0.6)
-            # When a fade_transition is active, SetWallpaper is called at peak
-            # opacity (full black), so the compositor is already obscured — kill
-            # the old process immediately; any surface flicker is invisible.
+            # When fade is active, SetWallpaper is called at peak opacity
+            # (full black) — any surface flicker is invisible, kill immediately.
 
             # SIGTERM → 1 s wait → SIGKILL: lets lwe clean up its Wayland
             # surface registration gracefully before dying.
@@ -238,10 +298,12 @@ class BackendRunner:
                     old_process.kill()
                     old_process.wait()
 
-            # Give the Wayland compositor 100 ms to release the surface and
-            # composite a clean frame before the new process takes over.
+            # Give the compositor 100 ms to release the surface and composite
+            # a clean frame before the new process takes over.
             time.sleep(0.1)
-            logger.debug("Overlap transition: retired old lwe (pid=%d)", old_process.pid)
+            logger.debug(
+                "Overlap transition: retired old lwe (pid=%d)", old_process.pid
+            )
 
     def stop(self) -> None:
         """Stop the lwe process gracefully and join the monitor thread."""
@@ -288,6 +350,7 @@ class BackendRunner:
         render_debug_type: str = "full",
         fade_transition: bool = True,
         fade_duration_ms: int = 400,
+        transition_mode: str = "auto",
     ) -> None:
         """Update playback settings and restart lwe if it is running."""
         self._fps_limit = fps_limit
@@ -307,6 +370,7 @@ class BackendRunner:
         self._render_debug_type = render_debug_type
         self._fade_transition = fade_transition
         self._fade_duration_ms = fade_duration_ms
+        self._transition_mode = transition_mode
         if self.is_running():
             self.restart()
 
