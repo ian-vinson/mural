@@ -278,10 +278,12 @@ class MuralCoreService(IMuralCore):
         self._current_media_json: str = ""
         self._last_media_key: str = ""
 
-        # D-Bus signal subscriptions (ScreenSaver + ActivityManager)
+        # D-Bus signal subscriptions (ScreenSaver + ActivityManager + sleep)
         self._gio_conn = None
+        self._system_conn = None
         self._screensaver_sub_id: int | None = None
         self._activity_sub_id: int | None = None
+        self._sleep_sub_id: int | None = None
 
         _cfg.load()
         if discovery.binary_found:
@@ -308,6 +310,7 @@ class MuralCoreService(IMuralCore):
                 fade_transition=bool(_cfg.get("fade_transition", True)),
                 fade_duration_ms=int(_cfg.get("fade_duration_ms", 400)),
                 transition_mode=str(_cfg.get("transition_mode", "auto")),
+                process_priority=str(_cfg.get("process_priority", "normal")),
             )
 
     # ------------------------------------------------------------------
@@ -422,7 +425,8 @@ class MuralCoreService(IMuralCore):
         volume = int(_cfg.get("volume", 80))
         no_automute = bool(_cfg.get("no_automute", False))
         no_audio_processing = bool(_cfg.get("no_audio_processing", False))
-        fullscreen_pause = bool(_cfg.get("fullscreen_pause", True))
+        on_app_fullscreen = str(_cfg.get("on_app_fullscreen", "pause"))
+        fullscreen_pause = on_app_fullscreen != "keep"
         fullscreen_pause_only_active = bool(_cfg.get("fullscreen_pause_only_active", False))
         fullscreen_ignore_appids = list(_cfg.get("fullscreen_ignore_appids", []))
         disable_mouse = bool(_cfg.get("disable_mouse", False))
@@ -457,6 +461,7 @@ class MuralCoreService(IMuralCore):
                 fade_transition=bool(_cfg.get("fade_transition", True)),
                 fade_duration_ms=int(_cfg.get("fade_duration_ms", 400)),
                 transition_mode=str(_cfg.get("transition_mode", "auto")),
+                process_priority=str(_cfg.get("process_priority", "normal")),
             )
         self._update_tick_timer()
         # Re-evaluate pause conditions and schedule with updated config.
@@ -808,19 +813,37 @@ class MuralCoreService(IMuralCore):
                     None,
                 )
                 logger.info("Subscribed to ActivityManager::CurrentActivityChanged")
+
+            try:
+                self._system_conn = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+                self._sleep_sub_id = self._system_conn.signal_subscribe(
+                    "org.freedesktop.login1",
+                    "org.freedesktop.login1.Manager",
+                    "PrepareForSleep",
+                    "/org/freedesktop/login1",
+                    None,
+                    Gio.DBusSignalFlags.NONE,
+                    self._on_prepare_for_sleep,
+                    None,
+                )
+                logger.info("Subscribed to login1::PrepareForSleep")
+            except Exception as exc:
+                logger.debug("PrepareForSleep subscription failed: %s", exc)
         except Exception as exc:
             logger.debug("_subscribe_system_signals failed: %s", exc)
 
     def _unsubscribe_system_signals(self) -> None:
-        if self._gio_conn is None:
-            return
         try:
-            if self._screensaver_sub_id is not None:
-                self._gio_conn.signal_unsubscribe(self._screensaver_sub_id)
-                self._screensaver_sub_id = None
-            if self._activity_sub_id is not None:
-                self._gio_conn.signal_unsubscribe(self._activity_sub_id)
-                self._activity_sub_id = None
+            if self._gio_conn is not None:
+                if self._screensaver_sub_id is not None:
+                    self._gio_conn.signal_unsubscribe(self._screensaver_sub_id)
+                    self._screensaver_sub_id = None
+                if self._activity_sub_id is not None:
+                    self._gio_conn.signal_unsubscribe(self._activity_sub_id)
+                    self._activity_sub_id = None
+            if self._system_conn is not None and self._sleep_sub_id is not None:
+                self._system_conn.signal_unsubscribe(self._sleep_sub_id)
+                self._sleep_sub_id = None
         except Exception as exc:
             logger.debug("_unsubscribe_system_signals: %s", exc)
 
@@ -929,6 +952,122 @@ class MuralCoreService(IMuralCore):
     # Power / app-rule pause management
     # ------------------------------------------------------------------
 
+    def _on_prepare_for_sleep(
+        self, connection, sender, path, iface, signal, params, user_data
+    ) -> None:
+        try:
+            going_to_sleep = bool(params.get_child_value(0).unpack())
+        except Exception:
+            return
+        on_sleep = str(_cfg.get("on_display_sleep", "stop"))
+        if going_to_sleep:
+            if on_sleep == "stop":
+                self._pause_reasons.add("sleep")
+                if self._runner and self._runner.is_running():
+                    self._runner.stop()
+                    logger.info("Display sleep: stopped lwe to free memory")
+        else:
+            if "sleep" in self._pause_reasons:
+                self._pause_reasons.discard("sleep")
+                if not self._pause_reasons:
+                    self._apply_all()
+                    logger.info("Display wake: resumed lwe")
+
+    def _detect_window_state(self) -> tuple[bool, bool]:
+        """Return (is_focused, is_maximized) using best-effort subprocess detection.
+
+        Tries KWin D-Bus (Wayland/KDE), then xdotool (X11). Returns (False, False)
+        when detection tools are unavailable.
+        """
+        import subprocess as _sp
+        is_focused = False
+        is_maximized = False
+
+        # KWin D-Bus (works on Wayland + KDE)
+        try:
+            r = _sp.run(
+                ["qdbus", "org.kde.KWin", "/KWin", "org.kde.KWin.activeWindow"],
+                capture_output=True, timeout=1,
+            )
+            if r.returncode == 0:
+                win_id = r.stdout.decode().strip()
+                if win_id and win_id != "0":
+                    is_focused = True
+        except (FileNotFoundError, _sp.TimeoutExpired):
+            # qdbus unavailable — try xdotool (X11)
+            try:
+                r = _sp.run(
+                    ["xdotool", "getactivewindow"],
+                    capture_output=True, timeout=1,
+                )
+                if r.returncode == 0 and r.stdout.decode().strip():
+                    is_focused = True
+            except (FileNotFoundError, _sp.TimeoutExpired):
+                pass
+
+        # Maximized: check _NET_WM_STATE via xprop + xdotool
+        try:
+            r = _sp.run(
+                ["bash", "-c",
+                 "xprop -id $(xdotool getactivewindow) _NET_WM_STATE 2>/dev/null"],
+                capture_output=True, timeout=2,
+            )
+            if r.returncode == 0:
+                state = r.stdout.decode()
+                if "_NET_WM_STATE_MAXIMIZED_VERT" in state and "_NET_WM_STATE_MAXIMIZED_HORZ" in state:
+                    is_maximized = True
+        except (FileNotFoundError, _sp.TimeoutExpired):
+            pass
+
+        return is_focused, is_maximized
+
+    def _check_window_state_pause(self, initial: bool = False) -> None:
+        """Check focused/maximized window state and update pause reasons."""
+        on_focused = str(_cfg.get("on_app_focused", "keep"))
+        on_maximized = str(_cfg.get("on_app_maximized", "keep"))
+
+        if on_focused == "keep" and on_maximized == "keep":
+            changed = "focus" in self._pause_reasons or "maximize" in self._pause_reasons
+            self._pause_reasons.discard("focus")
+            self._pause_reasons.discard("maximize")
+            if changed and not initial:
+                self._apply_all()
+            return
+
+        try:
+            is_focused, is_maximized = self._detect_window_state()
+        except Exception as exc:
+            logger.debug("_detect_window_state error: %s", exc)
+            return
+
+        # Focus
+        if on_focused != "keep":
+            if is_focused:
+                if "focus" not in self._pause_reasons:
+                    self._pause_reasons.add("focus")
+                    if not initial and self._runner and self._runner.is_running():
+                        self._runner.stop()
+                        logger.info("Window focus detected: stopped lwe (on_app_focused=%s)", on_focused)
+            else:
+                was = "focus" in self._pause_reasons
+                self._pause_reasons.discard("focus")
+                if was and not initial and not self._pause_reasons:
+                    self._apply_all()
+
+        # Maximize
+        if on_maximized != "keep":
+            if is_maximized:
+                if "maximize" not in self._pause_reasons:
+                    self._pause_reasons.add("maximize")
+                    if not initial and self._runner and self._runner.is_running():
+                        self._runner.stop()
+                        logger.info("Maximized window detected: stopped lwe")
+            else:
+                was = "maximize" in self._pause_reasons
+                self._pause_reasons.discard("maximize")
+                if was and not initial and not self._pause_reasons:
+                    self._apply_all()
+
     def _check_battery_pause(self, initial: bool = False) -> None:
         """Detect battery state and add/remove "battery" from _pause_reasons."""
         import psutil
@@ -998,6 +1137,7 @@ class MuralCoreService(IMuralCore):
 
     def _on_app_rule_tick(self) -> bool:
         self._check_app_rule_pause()
+        self._check_window_state_pause()
         return True
 
     # ------------------------------------------------------------------

@@ -137,6 +137,12 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "activity_sync_enabled": False,
     "activity_wallpapers": {},
     "pause_app_list": [],
+    "on_app_focused": "keep",
+    "on_app_maximized": "keep",
+    "on_app_fullscreen": "pause",
+    "on_display_sleep": "stop",
+    "video_loop_default": "loop",
+    "process_priority": "normal",
     "time_schedule_enabled": False,
     "time_schedule": [
         {"slot": "morning",   "time": "06:00", "path": ""},
@@ -827,10 +833,11 @@ class SettingsTab(QWidget):
         fs_layout.setContentsMargins(0, 0, 0, 0)
         fs_layout.setSpacing(4)
 
-        self._fullscreen_chk = QCheckBox(
-            "Pause wallpaper when a fullscreen window is detected"
-        )
-        fs_layout.addWidget(self._fullscreen_chk)
+        self._on_app_fullscreen_combo = QComboBox()
+        self._on_app_fullscreen_combo.addItem("Keep running", "keep")
+        self._on_app_fullscreen_combo.addItem("Pause", "pause")
+        self._on_app_fullscreen_combo.addItem("Stop (free memory)", "stop")
+        fs_layout.addWidget(self._on_app_fullscreen_combo)
 
         self._fs_options_widget = QWidget()
         fs_opts = QVBoxLayout(self._fs_options_widget)
@@ -858,9 +865,56 @@ class SettingsTab(QWidget):
         fs_opts.addWidget(hint)
 
         fs_layout.addWidget(self._fs_options_widget)
-        self._fullscreen_chk.toggled.connect(self._fs_options_widget.setEnabled)
-        self._fs_options_widget.setEnabled(False)
+        self._on_app_fullscreen_combo.currentIndexChanged.connect(
+            lambda _: self._fs_options_widget.setEnabled(
+                self._on_app_fullscreen_combo.currentData() != "keep"
+            )
+        )
+        self._fs_options_widget.setEnabled(True)
         form.addRow("Fullscreen:", fs_widget)
+
+        # Application behavior
+        app_behavior_lbl = QLabel("── Application Behavior ──")
+        app_behavior_lbl.setStyleSheet("color: #666; font-size: 11px; padding-top: 4px;")
+        form.addRow("", app_behavior_lbl)
+
+        self._on_app_focused_combo = QComboBox()
+        self._on_app_focused_combo.addItem("Keep running", "keep")
+        self._on_app_focused_combo.addItem("Pause", "pause")
+        self._on_app_focused_combo.addItem("Stop (free memory)", "stop")
+        form.addRow("Other app focused:", self._on_app_focused_combo)
+
+        self._on_app_maximized_combo = QComboBox()
+        self._on_app_maximized_combo.addItem("Keep running", "keep")
+        self._on_app_maximized_combo.addItem("Pause", "pause")
+        self._on_app_maximized_combo.addItem("Stop (free memory)", "stop")
+        form.addRow("Other app maximized:", self._on_app_maximized_combo)
+
+        app_behavior_note = QLabel(
+            "Focus/maximize detection uses xdotool (X11) or KWin D-Bus (Wayland). "
+            "Detection is best-effort and may not work on all compositors."
+        )
+        app_behavior_note.setWordWrap(True)
+        app_behavior_note.setStyleSheet("color: #666; font-size: 10px;")
+        form.addRow("", app_behavior_note)
+
+        # Display sleep
+        self._on_display_sleep_combo = QComboBox()
+        self._on_display_sleep_combo.addItem("Stop (free memory)", "stop")
+        self._on_display_sleep_combo.addItem("Keep running", "keep")
+        form.addRow("Display asleep:", self._on_display_sleep_combo)
+
+        sleep_note = QLabel("Stops lwe when the display sleeps to free VRAM; resumes on wake.")
+        sleep_note.setWordWrap(True)
+        sleep_note.setStyleSheet("color: #666; font-size: 10px;")
+        form.addRow("", sleep_note)
+
+        # Video loop default
+        self._video_loop_default_combo = QComboBox()
+        self._video_loop_default_combo.addItem("Loop", "loop")
+        self._video_loop_default_combo.addItem("No loop", "no_loop")
+        self._video_loop_default_combo.addItem("Ping-pong", "ping_pong")
+        form.addRow("Video loop default:", self._video_loop_default_combo)
 
         self._disable_mouse_chk = QCheckBox("Disable mouse parallax effects")
         form.addRow("Mouse:", self._disable_mouse_chk)
@@ -948,6 +1002,19 @@ class SettingsTab(QWidget):
         self._disable_particles_chk = QCheckBox("Disable particle effects")
         layout.addWidget(self._disable_particles_chk)
 
+        priority_row = QHBoxLayout()
+        priority_row.addWidget(QLabel("Process priority:"))
+        self._process_priority_combo = QComboBox()
+        self._process_priority_combo.addItem("Normal", "normal")
+        self._process_priority_combo.addItem("Below normal (nice +5)", "below_normal")
+        self._process_priority_combo.addItem("Idle (nice +10)", "idle")
+        priority_row.addWidget(self._process_priority_combo)
+        priority_row.addStretch()
+        layout.addLayout(priority_row)
+        prio_note = QLabel("Lower priority reduces Mural's impact on game and app performance.")
+        prio_note.setStyleSheet("font-size: 11px; color: #888;")
+        layout.addWidget(prio_note)
+
         # Advanced collapsible group
         adv_toggle = QPushButton("▶ Advanced")
         adv_toggle.setFlat(True)
@@ -986,7 +1053,12 @@ class SettingsTab(QWidget):
             self._quality_combo.setCurrentIndex(idx)
         self._fps_spin.setValue(preset["fps_limit"])
         self._mute_chk.setChecked(preset.get("mute_audio", False))
-        self._fullscreen_chk.setChecked(preset.get("fullscreen_pause", True))
+        if preset.get("fullscreen_pause", True):
+            idx = self._on_app_fullscreen_combo.findData("pause")
+        else:
+            idx = self._on_app_fullscreen_combo.findData("keep")
+        if idx >= 0:
+            self._on_app_fullscreen_combo.setCurrentIndex(idx)
         if "volume" in preset:
             self._volume_slider.setValue(preset["volume"])
         if "no_automute" in preset:
@@ -2025,8 +2097,6 @@ class SettingsTab(QWidget):
         self._no_automute_chk.setChecked(s.get("no_automute", False))
         self._no_audio_processing_chk.setChecked(s.get("no_audio_processing", False))
         self._battery_chk.setChecked(s.get("pause_on_battery", True))
-        self._fullscreen_chk.setChecked(s.get("fullscreen_pause", True))
-        self._fs_options_widget.setEnabled(s.get("fullscreen_pause", True))
         if s.get("fullscreen_pause_only_active", False):
             self._fs_active_radio.setChecked(True)
         else:
@@ -2068,6 +2138,24 @@ class SettingsTab(QWidget):
         tm_idx = self._transition_mode_combo.findData(tm)
         if tm_idx >= 0:
             self._transition_mode_combo.setCurrentIndex(tm_idx)
+        for combo, key, default in (
+            (self._on_app_fullscreen_combo, "on_app_fullscreen", "pause"),
+            (self._on_app_focused_combo,    "on_app_focused",    "keep"),
+            (self._on_app_maximized_combo,  "on_app_maximized",  "keep"),
+            (self._on_display_sleep_combo,  "on_display_sleep",  "stop"),
+            (self._video_loop_default_combo, "video_loop_default", "loop"),
+        ):
+            val = s.get(key, default)
+            idx = combo.findData(val)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        self._fs_options_widget.setEnabled(
+            self._on_app_fullscreen_combo.currentData() != "keep"
+        )
+        prio = s.get("process_priority", "normal")
+        prio_idx = self._process_priority_combo.findData(prio)
+        if prio_idx >= 0:
+            self._process_priority_combo.setCurrentIndex(prio_idx)
         self._activity_sync_chk.setChecked(s.get("activity_sync_enabled", False))
         self._app_list_edit.setPlainText(
             "\n".join(s.get("pause_app_list", []))
@@ -2128,7 +2216,6 @@ class SettingsTab(QWidget):
             "no_automute": self._no_automute_chk.isChecked(),
             "no_audio_processing": self._no_audio_processing_chk.isChecked(),
             "pause_on_battery": self._battery_chk.isChecked(),
-            "fullscreen_pause": self._fullscreen_chk.isChecked(),
             "fullscreen_pause_only_active": self._fs_active_radio.isChecked(),
             "fullscreen_ignore_appids": fs_ignore,
             "screen_span": self._screen_span_chk.isChecked(),
@@ -2153,6 +2240,13 @@ class SettingsTab(QWidget):
             "fade_transition": self._fade_transition_chk.isChecked(),
             "fade_duration_ms": self._fade_duration_spin.value(),
             "transition_mode": self._transition_mode_combo.currentData(),
+            "on_app_fullscreen": self._on_app_fullscreen_combo.currentData(),
+            "on_app_focused": self._on_app_focused_combo.currentData(),
+            "on_app_maximized": self._on_app_maximized_combo.currentData(),
+            "on_display_sleep": self._on_display_sleep_combo.currentData(),
+            "video_loop_default": self._video_loop_default_combo.currentData(),
+            "fullscreen_pause": self._on_app_fullscreen_combo.currentData() != "keep",
+            "process_priority": self._process_priority_combo.currentData(),
             "activity_sync_enabled": self._activity_sync_chk.isChecked(),
             "activity_wallpapers": {
                 row["activity_id"]: row.get("path", "")

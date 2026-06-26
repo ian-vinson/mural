@@ -151,6 +151,7 @@ class BackendRunner:
         fade_transition: bool = True,
         fade_duration_ms: int = 400,
         transition_mode: str = "auto",
+        process_priority: str = "normal",
     ) -> None:
         self._binary = Path(binary_path)
         self._assets = Path(assets_path) if assets_path else None
@@ -176,6 +177,7 @@ class BackendRunner:
         self._fade_transition = fade_transition
         self._fade_duration_ms = fade_duration_ms
         self._transition_mode = transition_mode
+        self._process_priority = process_priority
 
         self._process: subprocess.Popen[bytes] | None = None
         self._assignments: list[WallpaperAssignment] = []
@@ -351,6 +353,7 @@ class BackendRunner:
         fade_transition: bool = True,
         fade_duration_ms: int = 400,
         transition_mode: str = "auto",
+        process_priority: str = "normal",
     ) -> None:
         """Update playback settings and restart lwe if it is running."""
         self._fps_limit = fps_limit
@@ -371,6 +374,7 @@ class BackendRunner:
         self._fade_transition = fade_transition
         self._fade_duration_ms = fade_duration_ms
         self._transition_mode = transition_mode
+        self._process_priority = process_priority
         if self.is_running():
             self.restart()
 
@@ -445,8 +449,22 @@ class BackendRunner:
                 cmd += ["--screen-root", assignment.monitor, "--bg", assignment.wallpaper]
 
         for assignment in assignments:
-            for key, value in load_overrides(assignment.wallpaper).items():
+            overrides = load_overrides(assignment.wallpaper)
+            for key, value in overrides.items():
+                if key in ("speed", "loop_mode"):
+                    continue  # translated below
                 cmd += ["--set-property", f"{key}={value}"]
+            try:
+                speed = float(overrides.get("speed", "1.0"))
+            except (ValueError, TypeError):
+                speed = 1.0
+            if speed != 1.0:
+                cmd += ["--set-property", f"rate={speed}"]
+            loop_mode = overrides.get("loop_mode", "default")
+            if loop_mode == "no_loop":
+                cmd += ["--set-property", "noloop=1"]
+            elif loop_mode == "ping_pong":
+                cmd += ["--set-property", "pingpong=1"]
 
         for key, value in self._extra_props.items():
             cmd += ["--set-property", f"{key}={value}"]
@@ -521,11 +539,22 @@ class BackendRunner:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
+        _priority_nice = {"normal": 0, "below_normal": 5, "idle": 10}
+        _nice = _priority_nice.get(self._process_priority, 0)
+
+        def _preexec() -> None:
+            os.setsid()
+            if _nice:
+                try:
+                    os.nice(_nice)
+                except OSError:
+                    pass
+
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            preexec_fn=os.setsid,  # new process group → clean kill
+            preexec_fn=_preexec,
             env=env,
         )
         self._start_time = time.monotonic()

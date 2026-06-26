@@ -95,6 +95,8 @@ _THUMB_MAX_H   = 200
 _WIN_MIN_W     = 1100
 _WIN_MIN_H     = 680
 
+_SPEED_STEPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+
 
 # ---------------------------------------------------------------------------
 # Background palette worker
@@ -236,6 +238,12 @@ class _PreviewPanel(QWidget):
 
         layout.addWidget(meta_frame)
 
+        self._speed_section = self._build_speed_section()
+        layout.addWidget(self._speed_section)
+
+        self._loop_section = self._build_loop_section()
+        layout.addWidget(self._loop_section)
+
         self._props_section = self._build_props_section()
         layout.addWidget(self._props_section)
 
@@ -301,6 +309,71 @@ class _PreviewPanel(QWidget):
         self._open_btn.hide()
         self._open_btn.clicked.connect(self._on_open_folder)
         layout.addWidget(self._open_btn)
+
+    def _build_speed_section(self) -> QWidget:
+        """Build the per-wallpaper speed slider row."""
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 2, 0, 2)
+        h.setSpacing(6)
+
+        speed_lbl = QLabel("Speed:")
+        speed_lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+        speed_lbl.setFixedWidth(44)
+        h.addWidget(speed_lbl)
+
+        self._speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self._speed_slider.setRange(1, 8)
+        self._speed_slider.setValue(4)
+        self._speed_slider.setFixedWidth(110)
+        h.addWidget(self._speed_slider)
+
+        self._speed_value_lbl = QLabel("1.0x")
+        self._speed_value_lbl.setStyleSheet("font-size: 11px; color: #aaa;")
+        self._speed_value_lbl.setFixedWidth(34)
+        h.addWidget(self._speed_value_lbl)
+
+        self._speed_reset_btn = QPushButton("↺")
+        self._speed_reset_btn.setFixedSize(24, 24)
+        self._speed_reset_btn.setStyleSheet("font-size: 11px;")
+        self._speed_reset_btn.setToolTip("Reset to 1.0x")
+        h.addWidget(self._speed_reset_btn)
+
+        speed_hint = QLabel("(rate property)")
+        speed_hint.setStyleSheet("font-size: 10px; color: #555;")
+        h.addWidget(speed_hint)
+        h.addStretch()
+
+        self._speed_slider.valueChanged.connect(self._on_speed_changed)
+        self._speed_reset_btn.clicked.connect(self._on_speed_reset)
+
+        w.hide()
+        return w
+
+    def _build_loop_section(self) -> QWidget:
+        """Build the per-wallpaper loop mode combo (video only)."""
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 2, 0, 2)
+        h.setSpacing(6)
+
+        loop_lbl = QLabel("Loop:")
+        loop_lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+        loop_lbl.setFixedWidth(44)
+        h.addWidget(loop_lbl)
+
+        self._loop_combo = QComboBox()
+        self._loop_combo.addItem("Default (loop)", "default")
+        self._loop_combo.addItem("No loop", "no_loop")
+        self._loop_combo.addItem("Ping-pong", "ping_pong")
+        self._loop_combo.setFixedWidth(150)
+        h.addWidget(self._loop_combo)
+        h.addStretch()
+
+        self._loop_combo.currentIndexChanged.connect(self._on_loop_changed)
+
+        w.hide()
+        return w
 
     def _build_props_section(self) -> QWidget:
         """Build and return the collapsible properties panel widget."""
@@ -401,6 +474,7 @@ class _PreviewPanel(QWidget):
             self._start_palette_extraction(info.thumbnail_path)
 
         self._load_properties(info)
+        self._load_speed_loop(info)
 
     def refresh_monitors(self) -> None:
         """Re-query the Core Service for the current monitor list."""
@@ -528,6 +602,8 @@ class _PreviewPanel(QWidget):
         self._colors_row.hide()
         self._current_palette = []
         self._props_section.hide()
+        self._speed_section.hide()
+        self._loop_section.hide()
         self._current_props = []
 
     def _kill_preview(self) -> None:
@@ -761,6 +837,63 @@ class _PreviewPanel(QWidget):
         from mural.utils.properties import load_overrides, save_overrides
         overrides = load_overrides(self._current_info.path)
         overrides[prop.key] = value
+        save_overrides(self._current_info.path, overrides)
+        self._reapply_current()
+
+    def _load_speed_loop(self, info) -> None:
+        """Load saved speed and loop_mode overrides and update widgets."""
+        from mural.utils.properties import load_overrides
+        overrides = load_overrides(info.path)
+
+        try:
+            speed = float(overrides.get("speed", "1.0"))
+        except (ValueError, TypeError):
+            speed = 1.0
+        diffs = [abs(speed - s) for s in _SPEED_STEPS]
+        step = diffs.index(min(diffs)) + 1
+        self._speed_slider.blockSignals(True)
+        self._speed_slider.setValue(step)
+        self._speed_slider.blockSignals(False)
+        self._speed_value_lbl.setText(f"{_SPEED_STEPS[step - 1]}x")
+        self._speed_section.show()
+
+        loop_mode = overrides.get("loop_mode", "default")
+        if info.type.lower() == "video":
+            idx = self._loop_combo.findData(loop_mode)
+            self._loop_combo.blockSignals(True)
+            self._loop_combo.setCurrentIndex(max(0, idx))
+            self._loop_combo.blockSignals(False)
+            self._loop_section.show()
+        else:
+            self._loop_section.hide()
+
+    def _on_speed_changed(self, step: int) -> None:
+        if not self._current_info:
+            return
+        speed = _SPEED_STEPS[max(0, min(7, step - 1))]
+        self._speed_value_lbl.setText(f"{speed}x")
+        from mural.utils.properties import load_overrides, save_overrides
+        overrides = load_overrides(self._current_info.path)
+        if speed == 1.0:
+            overrides.pop("speed", None)
+        else:
+            overrides["speed"] = str(speed)
+        save_overrides(self._current_info.path, overrides)
+        self._reapply_current()
+
+    def _on_speed_reset(self) -> None:
+        self._speed_slider.setValue(4)
+
+    def _on_loop_changed(self, _index: int) -> None:
+        if not self._current_info:
+            return
+        loop_mode = self._loop_combo.currentData()
+        from mural.utils.properties import load_overrides, save_overrides
+        overrides = load_overrides(self._current_info.path)
+        if loop_mode == "default":
+            overrides.pop("loop_mode", None)
+        else:
+            overrides["loop_mode"] = loop_mode
         save_overrides(self._current_info.path, overrides)
         self._reapply_current()
 
