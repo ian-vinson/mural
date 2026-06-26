@@ -4,50 +4,94 @@ All notable changes to Mural are documented here.
 
 ---
 
-## [0.2.0-alpha] — 2026-06-25
+## [0.2.0-alpha] — 2026-06-26
 
 ### Added
 
-**Transition Fade Overlay** (`mural/gui/fade_overlay.py`)
-- New `FadeOverlay` widget: frameless, top-most black overlay that fades to opaque then back to
-  transparent when switching wallpapers, masking the raw cut between two lwe instances.
-- `_PreviewPanel` creates one `FadeOverlay` instance at startup and calls `do_transition()` before
-  every `SetWallpaper` D-Bus call.
-- Settings → Playback: "Fade transition when switching wallpapers" checkbox (`fade_transition`,
-  default `true`) and "Duration" spinbox (`fade_duration_ms`, default `400 ms`).
+**Transitions & Stability**
+- Fade overlay transition: configurable black crossfade between wallpapers (`fade_overlay.py`).
+- KDE sequential transition mode: eliminates Wayland surface scan-line artifacts on KWin.
+- Transition mode setting in Settings → Playback: Auto / Sequential / Overlap.
 
-**Session Lock Auto-Screenshot for SDDM** (`mural/core/service.py`)
-- Service now subscribes to `org.freedesktop.ScreenSaver::ActiveChanged` via GIO D-Bus signals at
-  startup.
-- On screen lock: captures the current wallpaper to `~/.local/share/mural/sddm_lock.jpg` using
-  `lwe --screenshot --screenshot-delay 0`.
-- If `auto_sddm_update` is enabled and an SDDM theme is detected in `/etc/sddm.conf`, runs
-  `pkexec cp <src> /usr/share/sddm/themes/<theme>/background.jpg` automatically.
-- Settings → Screensaver: "Auto-update SDDM background when screen locks (requires pkexec)"
-  checkbox (`auto_sddm_update`, default `false`).
+**lwe Flag Coverage (full flag set now wired)**
+- Volume slider 0–100 replacing the mute-only checkbox.
+- No-automute option: keep audio when other apps play.
+- No-audio-processing: disable audio-reactive features.
+- Screen span: single wallpaper stretched across all monitors.
+- Disable particles flag.
+- Texture clamping mode: clamp / border / repeat.
+- Granular fullscreen pause: per-monitor only mode, or ignore by app ID.
+- Render debug mode (Ctrl+Shift+D developer toggle).
+- Video loop mode per wallpaper: loop / no-loop / ping-pong.
+- Per-wallpaper animation speed via property detection (⚡ Playback Rate label in Properties panel).
+- Video hardware acceleration: Auto / NVDEC / VAAPI / Disabled.
+- Process priority: Normal / Below normal / Idle (nice values).
 
-**KDE Activities Integration** (`mural/core/service.py`, `mural/gui/settings_tab.py`)
-- New D-Bus method `GetActivities() -> str`: returns a JSON array `[{id, name}]` by querying
-  `org.kde.ActivityManager.Activities.{ListActivities,ActivityName}`.  Returns `[]` on
-  non-Plasma desktops.
-- Service subscribes to `org.kde.ActivityManager.Activities::CurrentActivityChanged` on Plasma.
-  When the active activity changes and `activity_sync_enabled` is `true`, the wallpaper assigned
-  to that activity in `activity_wallpapers` config is applied to all monitors.
-- Settings → KDE Activities: enable/disable checkbox, per-activity wallpaper pickers with
-  "Refresh activities" button, populated from the live service.
+**Pause Conditions**
+- Focus/maximize pause: configurable keep/pause/stop per condition.
+- Display sleep detection: stops lwe on monitor sleep via logind.
+- VRAM exhaustion pause: monitors nvidia-smi / rocm-smi, configurable threshold.
 
-**Mass Image Import to Playlist** (`mural/gui/playlist_tab.py`)
-- New `_DnDList(QListWidget)` subclass with `items_dropped = Signal(list)`: accepts external
-  file/URL drops from the file manager (via `text/uri-list`) while preserving internal drag-and-drop
-  reordering.
-- The playlist wallpaper list now uses `_DnDList` — items can be dragged in from Dolphin or any
-  other file manager.
-- "Import Images" button: opens a directory picker, recursively scans for `*.jpg *.jpeg *.png
-  *.gif *.webp *.bmp`, shows a count confirmation dialog, then batch-adds all files via
-  `AddToPlaylist()`.
+**Monitoring & Integration**
+- GPU memory live display in Settings → Performance.
+- MPRIS now-playing: album art, title, artist in preview panel.
+- OpenRGB sync: dominant palette color sent to all RGB devices on wallpaper change.
+- Matugen integration: Material You theming applied on wallpaper change.
+- Hyprland IPC color sync: border colors follow wallpaper palette.
+- Waybar module: colored dot + wallpaper name.
+
+**Profiles & Management**
+- Multi-monitor profiles: save / load / delete named assignment sets.
+- Time-of-day scheduling: four configurable wallpaper slots.
+- Mass image import to playlists (folder picker + drag-and-drop from file manager).
+
+**Infrastructure**
+- `mural-cli`: full command-line interface for scripting and keybinds.
+- KDE global hotkeys installer (`mural/hotkeys/`).
+- SDDM lock screen screenshot on session lock (optional pkexec copy to theme dir).
+- Screensaver mode: KDE screensaver `.desktop` entry installer.
+- AUR PKGBUILD + `.SRCINFO` for `mural-git`.
+- `pyproject.toml` packaging with hatchling.
+
+**Library & Preview**
+- Per-wallpaper scaling persistence in `~/.config/mural/wallpaper_properties.json`; ↔ indicator
+  on library cards when a non-default scaling override is saved.
+- Monitor resolution display (`W×H`) next to the monitor dropdown.
+- PKG version compatibility detection: amber ⚠ badge on library cards and warning label in the
+  preview panel for wallpapers using PKGV > 0008 scene package format.
+- `usershortcut`, `separator`, `label`, and `group` property types skipped gracefully (debug log).
+- Conditional properties (those with a WE `condition` field) marked with a `*` suffix and tooltip
+  showing the condition expression; rendered in grey to distinguish from always-active properties.
+- Version string in the window title bar (`Mural 0.2.0-alpha`).
+- Help → About Mural dialog: version, rendering backend, license.
+
+**Session Lock (SDDM)**
+- Subscribes to `org.freedesktop.ScreenSaver::ActiveChanged`; captures the live wallpaper to
+  `~/.local/share/mural/sddm_lock.jpg` and optionally copies it into the active SDDM theme
+  directory via `pkexec` when `auto_sddm_update` is enabled.
+
+**KDE Activities**
+- D-Bus method `GetActivities() → str` (JSON array of `{id, name}` objects).
+- Per-activity wallpaper assignment that switches on `CurrentActivityChanged`.
+
+### Fixed
+- Steam symlink deduplication: `~/.steam/steam → ~/.local/share/Steam` no longer produces
+  duplicate library entries.
+- Library grid reflow: card grid now correctly recalculates column count on window resize and
+  un-maximize (was reading widget width instead of viewport width).
+- lwe process accumulation: hard psutil guard + intentional-stop flag prevent orphan processes.
+- KWin scan-line artifacts on wallpaper switch (sequential transition mode).
+- `--scaling` flag argument order: now placed between `--screen-root` and `--bg` as lwe requires;
+  previously the flag was appended after `--bg` and silently ignored.
+- D-Bus service Python 3.14 + dasbus annotation incompatibility.
+- `gi` (PyGObject) venv access requires `--system-site-packages`; documented in PKGBUILD.
+- `clicked.disconnect()` RuntimeWarning on palette swatch re-connection (already guarded).
+- Preview lwe stderr no longer floods the terminal: GLFW Wayland position warning and GLEW
+  initialisation messages suppressed via daemon drain thread.
 
 ### Changed
-
+- Speed slider removed from the preview panel; speed control is now the wallpaper's own
+  Playback Rate property in the Properties panel, highlighted with ⚡ when detected.
 - Version bumped to `0.2.0-alpha` in `mural/__init__.py`, `pyproject.toml`,
   `mural/core/service.py`, and `mural/main.py`.
 

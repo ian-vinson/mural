@@ -291,21 +291,62 @@ MURAL PLATFORM
 KNOWN LIMITATIONS
 -----------------
 
-lwe scene compatibility:
-  Some Scene wallpapers use features not yet implemented in
-  linux-wallpaperengine (solidlayer models, newer shader types,
-  HDR rendering). These will fail with a clear error in the journal.
-  Check: journalctl --user -u mural-core.service -f
+lwe compatibility errors:
+  Some Scene wallpapers use rendering features not yet implemented in
+  linux-wallpaperengine and will fail to display.  Common error patterns
+  seen in `journalctl --user -u mural-core.service -f`:
 
-Zoomed/cropped wallpapers:
-  Wallpapers designed for 16:9 may appear zoomed on ultrawide monitors.
-  Fix: select the wallpaper, change Scaling to "Fill" or "Fit" in the
-  preview panel — this setting is saved per wallpaper.
+    "Failed to load model: solidlayer"
+      → Wallpaper uses a 3-D solid-layer model.  No workaround; skip it.
+
+    "Unknown shader type: X"
+      → Wallpaper uses a newer shader node type.  No workaround; skip it.
+
+    "GLFW error 65548: Wayland: The platform does not support setting
+     the window position"
+      → Harmless Wayland positioning warning; suppressed in the preview
+        panel but may appear in the service journal.  No action needed.
+
+    "Failed to initialize GLEW"
+      → Usually appears alongside the GLFW error above.  Harmless.
+
+  Mural marks library cards with an amber ⚠ badge when it detects a
+  newer scene package format (PKGV > 0008) that is likely to trigger
+  rendering errors.
+
+Scene package format (PKGV):
+  Wallpaper Engine packs scene assets into a `scene.pkg` binary whose
+  format version is stored in the file header as "PKGVnnnn" (e.g.
+  "PKGV0012").  linux-wallpaperengine currently supports up to PKGV0008.
+  Wallpapers with a higher version number may render incorrectly or not
+  at all.  Video (`type: video`) and web (`type: web`) wallpapers do not
+  use `scene.pkg` and are unaffected by this limit.
+
+  To check a wallpaper's package version manually:
+    python3 -c "
+    import sys; f=open(sys.argv[1],'rb'); f.seek(8); print(f.read(8))
+    " /path/to/wallpaper/scene.pkg
+
+Zoomed or cropped wallpapers:
+  Wallpapers designed for 16:9 may appear zoomed or cropped on ultrawide
+  monitors.  Mural shows an amber ↔ indicator on library cards that have
+  a non-standard aspect ratio.
+
+  Fix: select the wallpaper → change Scaling to "Fill" or "Fit" in the
+  preview panel.  This setting is saved per wallpaper and applied every
+  time that wallpaper is activated.
+
+Animation speed control:
+  The ⚡ Playback Rate slider in the Properties panel is only shown when
+  the wallpaper's `project.json` defines a property with a key containing
+  "rate", "speed", or "playback".  For wallpapers that lack this property
+  there is no speed control — this is an lwe limitation.
 
 Global rendering quality:
   Anti-aliasing, shadows, reflections, and post-processing are not
-  exposed by lwe as command-line flags. These require upstream lwe changes.
-  FPS cap and particle disable are available as workarounds.
+  exposed by lwe as command-line flags and cannot be configured from
+  Mural.  These require upstream lwe changes.  FPS cap and particle
+  disable are available as partial workarounds.
 
 ---
 

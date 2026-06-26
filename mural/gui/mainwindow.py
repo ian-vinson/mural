@@ -783,8 +783,12 @@ class _PreviewPanel(QWidget):
     def _build_prop_widget(self, prop, current_value: str) -> QWidget:
         """Return a widget appropriate for *prop*'s type."""
         if prop.type == "bool":
-            chk = QCheckBox(prop.label)
-            chk.setStyleSheet("font-size: 12px; color: #ccc;")
+            chk = QCheckBox(prop.label + (" *" if prop.condition else ""))
+            if prop.condition:
+                chk.setStyleSheet("font-size: 12px; color: #999;")
+                chk.setToolTip(f"Conditional: {prop.condition}")
+            else:
+                chk.setStyleSheet("font-size: 12px; color: #ccc;")
             chk.setChecked(current_value not in ("0", "false", ""))
             chk.toggled.connect(
                 lambda checked, p=prop: self._on_prop_changed(p, "1" if checked else "0")
@@ -798,12 +802,18 @@ class _PreviewPanel(QWidget):
             vbox.setSpacing(2)
 
             _is_playback = any(kw in prop.key.lower() for kw in ("rate", "speed", "playback"))
+            _cond_suffix = " *" if prop.condition else ""
             lbl_row = QHBoxLayout()
-            lbl = QLabel("⚡ Playback Rate" if _is_playback else prop.label)
+            _base_lbl = ("⚡ Playback Rate" if _is_playback else prop.label) + _cond_suffix
+            lbl = QLabel(_base_lbl)
             if _is_playback:
                 lbl.setStyleSheet("font-size: 12px; color: #80DEEA; font-weight: bold;")
+            elif prop.condition:
+                lbl.setStyleSheet("font-size: 12px; color: #999;")
             else:
                 lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+            if prop.condition:
+                lbl.setToolTip(f"Conditional: {prop.condition}")
             val_lbl = QLabel()
             val_lbl.setStyleSheet("font-size: 11px; color: #aaa;")
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -836,8 +846,10 @@ class _PreviewPanel(QWidget):
             container = QWidget()
             h = QHBoxLayout(container)
             h.setContentsMargins(0, 0, 0, 0)
-            lbl = QLabel(prop.label + ":")
-            lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+            lbl = QLabel((prop.label + (" *" if prop.condition else "")) + ":")
+            lbl.setStyleSheet("font-size: 12px; color: #999;" if prop.condition else "font-size: 12px; color: #ccc;")
+            if prop.condition:
+                lbl.setToolTip(f"Conditional: {prop.condition}")
             h.addWidget(lbl)
             btn = QPushButton()
             btn.setFixedSize(56, 22)
@@ -868,8 +880,10 @@ class _PreviewPanel(QWidget):
             container = QWidget()
             h = QHBoxLayout(container)
             h.setContentsMargins(0, 0, 0, 0)
-            lbl = QLabel(prop.label + ":")
-            lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+            lbl = QLabel((prop.label + (" *" if prop.condition else "")) + ":")
+            lbl.setStyleSheet("font-size: 12px; color: #999;" if prop.condition else "font-size: 12px; color: #ccc;")
+            if prop.condition:
+                lbl.setToolTip(f"Conditional: {prop.condition}")
             h.addWidget(lbl)
             combo = QComboBox()
             combo.setStyleSheet("font-size: 12px;")
@@ -891,8 +905,10 @@ class _PreviewPanel(QWidget):
         container = QWidget()
         h = QHBoxLayout(container)
         h.setContentsMargins(0, 0, 0, 0)
-        lbl = QLabel(prop.label + ":")
-        lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+        lbl = QLabel((prop.label + (" *" if prop.condition else "")) + ":")
+        lbl.setStyleSheet("font-size: 12px; color: #999;" if prop.condition else "font-size: 12px; color: #ccc;")
+        if prop.condition:
+            lbl.setToolTip(f"Conditional: {prop.condition}")
         h.addWidget(lbl)
         edit = QLineEdit(current_value)
         edit.setStyleSheet("font-size: 12px;")
@@ -1188,7 +1204,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._core = core_proxy
 
-        self.setWindowTitle("Mural")
+        from mural import __version__
+        self.setWindowTitle(f"Mural {__version__}")
         self.setMinimumSize(_WIN_MIN_W, _WIN_MIN_H)
         self.resize(1400, 860)
         screen = QApplication.primaryScreen()
@@ -1341,6 +1358,11 @@ class MainWindow(QMainWindow):
         stop_action.triggered.connect(self._stop_service)
         service_menu.addActions([start_action, restart_action, stop_action])
 
+        help_menu = menubar.addMenu("&Help")
+        about_action = QAction("&About Mural", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
     def _build_status_bar(self) -> None:
         bar = QStatusBar()
         self.setStatusBar(bar)
@@ -1417,6 +1439,19 @@ class MainWindow(QMainWindow):
             start_new_session=True,
         )
         QTimer.singleShot(1000, self._update_status_bar)
+
+    def _show_about(self) -> None:
+        from mural import __version__
+        QMessageBox.about(
+            self,
+            "About Mural",
+            f"<b>Mural</b> {__version__}<br><br>"
+            "Animated wallpaper platform for Linux.<br>"
+            "Rendering backend: linux-wallpaperengine by Almamu<br><br>"
+            "<a href='https://github.com/ian-vinson/mural'>"
+            "github.com/ian-vinson/mural</a><br><br>"
+            "Licensed under GPL v3",
+        )
 
     # ------------------------------------------------------------------
     # Event handlers

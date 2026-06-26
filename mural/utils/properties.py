@@ -14,9 +14,12 @@ Scene wallpapers define user-configurable properties in ``project.json``
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 PROPS_FILE = Path("~/.config/mural/wallpaper_properties.json").expanduser()
 
@@ -30,6 +33,14 @@ _TYPE_MAP: dict[str, str] = {
     "integer":   "slider",
     "double":    "slider",
 }
+
+# Property types that are UI/display-only in Wallpaper Engine — skip silently.
+_SKIP_PROP_TYPES: frozenset[str] = frozenset({
+    "group",        # section header, no value
+    "usershortcut", # keyboard binding metadata
+    "separator",    # horizontal rule in WE UI
+    "label",        # static display text
+})
 
 
 @dataclass
@@ -55,6 +66,7 @@ class WallpaperProperty:
     max_val: float = 1.0
     step: float = 0.1
     options: list[str] = field(default_factory=list)
+    condition: str = ""
 
 
 def parse_properties(project_json_path: str) -> list[WallpaperProperty]:
@@ -75,8 +87,16 @@ def parse_properties(project_json_path: str) -> list[WallpaperProperty]:
     for key, item in raw.items():
         if not isinstance(item, dict):
             continue
-        mapped = _TYPE_MAP.get(item.get("type", ""))
+        prop_type = item.get("type", "").lower()
+        if not prop_type:
+            logger.debug("Skipping property with no type: %s", key)
+            continue
+        if prop_type in _SKIP_PROP_TYPES:
+            logger.debug("Skipping UI-only property type %r: %s", prop_type, key)
+            continue
+        mapped = _TYPE_MAP.get(prop_type)
         if mapped is None:
+            logger.debug("Unknown property type %r for %s — skipping", prop_type, key)
             continue
 
         label = item.get("text") or key
@@ -131,6 +151,7 @@ def parse_properties(project_json_path: str) -> list[WallpaperProperty]:
             max_val=max_val,
             step=step,
             options=options,
+            condition=str(item.get("condition", "")),
         ))
 
     order_map = {
