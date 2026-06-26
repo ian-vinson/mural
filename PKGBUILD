@@ -1,4 +1,4 @@
-# Maintainer: Ian Vinson <ian_vinson@foxitsoftware.com>
+# Maintainer: Ian Vinson <murallinuxwallpaper@gmail.com>
 # PKGBUILD — Arch User Repository package definition for Mural
 
 pkgname=mural-git
