@@ -9,7 +9,7 @@ required after install.
 
 Built for the Linux desktop Wallpaper Engine always refused to support.
 
-
+![Mural Library Tab](assets/screenshots/1.png)
 
 ![Mural Platform](assets/screenshots/2.png)
 
