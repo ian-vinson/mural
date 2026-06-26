@@ -164,6 +164,17 @@ def _classify_file(path: Path) -> WallpaperInfo | None:
     return None
 
 
+def _check_aspect_mismatch(resolution: str) -> bool:
+    """Return True if width/height < 2.0 — may not fill an ultrawide screen correctly."""
+    if not resolution or "x" not in resolution.lower():
+        return False
+    try:
+        w, h = (int(v) for v in resolution.lower().split("x", 1))
+        return h > 0 and w / h < 2.0
+    except (ValueError, TypeError):
+        return False
+
+
 def _classify_directory(path: Path) -> WallpaperInfo | None:
     """Return a :class:`WallpaperInfo` if *path* is a scene or web wallpaper folder."""
     # Scene wallpaper — linux-wallpaperengine format
@@ -192,6 +203,7 @@ def _classify_directory(path: Path) -> WallpaperInfo | None:
             description=meta["description"],
             file_size=_dir_size(path),
             source="local",
+            aspect_mismatch=_check_aspect_mismatch(meta["resolution"]),
         )
 
     # Web wallpaper — folder contains index.html
@@ -901,3 +913,9 @@ class LibraryTab(QWidget):
     def refresh(self) -> None:
         """Re-scan all directories (called by the main window's refresh action)."""
         self._start_scan()
+
+    def refresh_card_indicators(self, path: str) -> None:
+        """Recompute dynamic indicators for the card at *path* after scaling changes."""
+        card = self._path_to_card.get(path)
+        if card is not None:
+            card.refresh_indicators()

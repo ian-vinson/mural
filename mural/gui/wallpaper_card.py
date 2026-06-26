@@ -101,6 +101,7 @@ class WallpaperInfo:
     tags: list[str] = field(default_factory=list)
     source: str = "local"
     description: str = ""
+    aspect_mismatch: bool = False
 
     def type_label(self) -> str:
         """Return the uppercase badge label for this type."""
@@ -152,6 +153,7 @@ class WallpaperCard(QWidget):
         self._hovered = False
         self._selected = False
         self._has_props = self._check_has_props()
+        self._has_custom_scaling = self._check_has_custom_scaling()
 
         self.setFixedSize(_CARD_W, _CARD_H)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -179,6 +181,12 @@ class WallpaperCard(QWidget):
         if self._selected != selected:
             self._selected = selected
             self.update()
+
+    def refresh_indicators(self) -> None:
+        """Recompute disk-backed indicators and repaint the card."""
+        self._has_props = self._check_has_props()
+        self._has_custom_scaling = self._check_has_custom_scaling()
+        self.update()
 
     def set_thumbnail(self, pixmap: QPixmap) -> None:
         """Replace the thumbnail with an externally-supplied pixmap.
@@ -221,6 +229,11 @@ class WallpaperCard(QWidget):
 
         if self._has_props:
             self._draw_props_indicator(painter)
+
+        if self._has_custom_scaling:
+            self._draw_scaling_indicator(painter)
+        elif self._info.aspect_mismatch:
+            self._draw_aspect_mismatch_indicator(painter)
 
         if self._selected:
             self._draw_selection_border(painter)
@@ -316,10 +329,29 @@ class WallpaperCard(QWidget):
         font = QFont()
         font.setPixelSize(13)
         p.setFont(font)
-        # Semi-transparent dark backing so the icon is readable over any thumbnail.
         p.fillRect(2, _THUMB_H - 20, 20, 18, QColor(0, 0, 0, 120))
         p.setPen(QColor("#FFD54F"))
         p.drawText(2, _THUMB_H - 20, 20, 18, Qt.AlignmentFlag.AlignCenter, "⚙")
+
+    def _draw_scaling_indicator(self, p: QPainter) -> None:
+        """Draw a ↔ icon when a non-default scaling is saved for this wallpaper."""
+        x = 24 if self._has_props else 2
+        font = QFont()
+        font.setPixelSize(13)
+        p.setFont(font)
+        p.fillRect(x, _THUMB_H - 20, 20, 18, QColor(0, 0, 0, 120))
+        p.setPen(QColor("#80DEEA"))
+        p.drawText(x, _THUMB_H - 20, 20, 18, Qt.AlignmentFlag.AlignCenter, "↔")
+
+    def _draw_aspect_mismatch_indicator(self, p: QPainter) -> None:
+        """Draw a ⚠ icon for wallpapers whose aspect ratio may not fill the screen."""
+        x = 24 if self._has_props else 2
+        font = QFont()
+        font.setPixelSize(13)
+        p.setFont(font)
+        p.fillRect(x, _THUMB_H - 20, 20, 18, QColor(0, 0, 0, 120))
+        p.setPen(QColor("#FFD54F"))
+        p.drawText(x, _THUMB_H - 20, 20, 18, Qt.AlignmentFlag.AlignCenter, "⚠")
 
     def _draw_selection_border(self, p: QPainter) -> None:
         """Draw a coloured border around the card when selected."""
@@ -419,5 +451,14 @@ class WallpaperCard(QWidget):
         try:
             from mural.utils.properties import has_properties
             return has_properties(self._info.path)
+        except Exception:
+            return False
+
+    def _check_has_custom_scaling(self) -> bool:
+        """Return True if a non-default scaling is persisted for this wallpaper."""
+        try:
+            from mural.utils.properties import load_overrides
+            scaling = load_overrides(self._info.path).get("scaling", "default")
+            return bool(scaling) and scaling != "default"
         except Exception:
             return False

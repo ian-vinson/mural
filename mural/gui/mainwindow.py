@@ -52,7 +52,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer
 from PySide6.QtCore import Signal
@@ -133,6 +133,8 @@ class _PreviewPanel(QWidget):
         platform_tab: Reference used to trigger downloads.
         parent: Optional Qt parent.
     """
+
+    scaling_changed: ClassVar[Signal] = Signal(str)
 
     def __init__(
         self,
@@ -289,8 +291,31 @@ class _PreviewPanel(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._scaling_combo.addItems(["default", "stretch", "fit", "fill"])
+        self._scaling_combo.currentIndexChanged.connect(self._on_scaling_changed)
         scaling_row.addWidget(self._scaling_combo, 1)
+        _hint_btn = QPushButton("?")
+        _hint_btn.setFixedSize(20, 20)
+        _hint_btn.setFlat(True)
+        _hint_btn.setStyleSheet(
+            "QPushButton { font-size: 11px; color: #888; border: 1px solid #444;"
+            " border-radius: 10px; }"
+            "QPushButton:hover { color: #ccc; border-color: #666; }"
+        )
+        _hint_btn.setToolTip(
+            "If the wallpaper appears zoomed or cropped, try:\n"
+            "  Fill — crops edges to fill the screen (most common fix)\n"
+            "  Fit — shows the full wallpaper with letterbox bars\n"
+            "  Stretch — stretches to fill (may distort)\n"
+            "  Default — uses the wallpaper's built-in scaling"
+        )
+        scaling_row.addWidget(_hint_btn)
         layout.addLayout(scaling_row)
+
+        self._scaling_note = QLabel()
+        self._scaling_note.setWordWrap(True)
+        self._scaling_note.setStyleSheet("font-size: 11px; color: #FFB74D;")
+        self._scaling_note.hide()
+        layout.addWidget(self._scaling_note)
 
         # Action buttons
         self._apply_btn = QPushButton("Set as Wallpaper")
@@ -475,6 +500,14 @@ class _PreviewPanel(QWidget):
 
         self._load_properties(info)
         self._load_speed_loop(info)
+        self._load_scaling(info)
+        if info.aspect_mismatch:
+            self._scaling_note.setText(
+                "Designed for a different aspect ratio — try 'Fill' if it appears zoomed."
+            )
+            self._scaling_note.show()
+        else:
+            self._scaling_note.hide()
 
     def refresh_monitors(self) -> None:
         """Re-query the Core Service for the current monitor list."""
@@ -604,6 +637,7 @@ class _PreviewPanel(QWidget):
         self._props_section.hide()
         self._speed_section.hide()
         self._loop_section.hide()
+        self._scaling_note.hide()
         self._current_props = []
 
     def _kill_preview(self) -> None:
@@ -897,6 +931,30 @@ class _PreviewPanel(QWidget):
         save_overrides(self._current_info.path, overrides)
         self._reapply_current()
 
+    def _load_scaling(self, info: WallpaperInfo) -> None:
+        """Load saved scaling override for *info* and sync the combo without triggering a save."""
+        from mural.utils.properties import load_overrides
+        scaling = load_overrides(info.path).get("scaling", "default")
+        self._scaling_combo.blockSignals(True)
+        idx = self._scaling_combo.findText(scaling)
+        self._scaling_combo.setCurrentIndex(max(0, idx))
+        self._scaling_combo.blockSignals(False)
+
+    def _on_scaling_changed(self, _index: int) -> None:
+        """Persist the scaling selection and reapply if this wallpaper is active."""
+        if not self._current_info:
+            return
+        scaling = self._scaling_combo.currentText()
+        from mural.utils.properties import load_overrides, save_overrides
+        overrides = load_overrides(self._current_info.path)
+        if scaling == "default":
+            overrides.pop("scaling", None)
+        else:
+            overrides["scaling"] = scaling
+        save_overrides(self._current_info.path, overrides)
+        self.scaling_changed.emit(self._current_info.path)
+        self._reapply_current()
+
     def _on_props_reset(self) -> None:
         """Clear all overrides for the current wallpaper and restart lwe."""
         if not self._current_info:
@@ -919,6 +977,8 @@ class _PreviewPanel(QWidget):
         if not self._core or not self._current_info:
             return
         path = self._current_info.path
+        from mural.utils.properties import load_overrides
+        scaling = load_overrides(path).get("scaling", "default")
         try:
             monitors = list(self._core.GetMonitors())
         except Exception:
@@ -926,7 +986,7 @@ class _PreviewPanel(QWidget):
         for monitor in monitors:
             try:
                 if self._core.GetCurrentWallpaper(monitor) == path:
-                    self._core.SetWallpaper(monitor, path, "default")
+                    self._core.SetWallpaper(monitor, path, scaling)
             except Exception:
                 pass
 
@@ -1293,6 +1353,9 @@ class MainWindow(QMainWindow):
 
         # Downloaded platform wallpaper → refresh local library.
         self._platform_tab.wallpaper_downloaded.connect(self._on_download_complete)
+
+        # Scaling override saved → refresh the library card indicator.
+        self._preview.scaling_changed.connect(self._library_tab.refresh_card_indicators)
 
         # Settings saved → propagate to service and preview panel.
         self._settings_tab.settings_saved.connect(self._on_settings_saved)

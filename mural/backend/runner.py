@@ -445,23 +445,39 @@ class BackendRunner:
         elif self._video_hwaccel in ("vaapi", "nvdec"):
             cmd += ["--set-property", f"hwdec={self._video_hwaccel}"]
 
+        # Pre-load per-wallpaper overrides — used for both scaling and --set-property.
+        _ovr_cache: dict[str, dict[str, str]] = {
+            a.wallpaper: load_overrides(a.wallpaper) for a in assignments
+        }
+
         # Screen assignments — span mode vs per-monitor mode
         if self._screen_span and len(assignments) > 1:
             monitors_str = ",".join(a.monitor for a in assignments)
-            if assignments[0].scaling and assignments[0].scaling != "default":
-                cmd += ["--scaling", assignments[0].scaling]
-            cmd += ["--screen-span", monitors_str, "--bg", assignments[0].wallpaper]
+            _a0 = assignments[0]
+            _per_scaling = _ovr_cache[_a0.wallpaper].get("scaling")
+            _eff_scaling = (
+                _per_scaling if _per_scaling and _per_scaling != "default"
+                else _a0.scaling
+            )
+            if _eff_scaling and _eff_scaling != "default":
+                cmd += ["--scaling", _eff_scaling]
+            cmd += ["--screen-span", monitors_str, "--bg", _a0.wallpaper]
         else:
             for assignment in assignments:
-                if assignment.scaling and assignment.scaling != "default":
-                    cmd += ["--scaling", assignment.scaling]
+                _per_scaling = _ovr_cache[assignment.wallpaper].get("scaling")
+                _eff_scaling = (
+                    _per_scaling if _per_scaling and _per_scaling != "default"
+                    else assignment.scaling
+                )
+                if _eff_scaling and _eff_scaling != "default":
+                    cmd += ["--scaling", _eff_scaling]
                 cmd += ["--screen-root", assignment.monitor, "--bg", assignment.wallpaper]
 
         for assignment in assignments:
-            overrides = load_overrides(assignment.wallpaper)
+            overrides = _ovr_cache[assignment.wallpaper]
             for key, value in overrides.items():
-                if key in ("speed", "loop_mode"):
-                    continue  # translated below
+                if key in ("speed", "loop_mode", "scaling"):
+                    continue  # handled as command flags, not --set-property
                 cmd += ["--set-property", f"{key}={value}"]
             try:
                 speed = float(overrides.get("speed", "1.0"))
