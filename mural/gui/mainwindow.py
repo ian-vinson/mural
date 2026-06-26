@@ -1051,11 +1051,15 @@ class _PreviewPanel(QWidget):
                     "border-radius: 3px;"
                 )
                 btn.setToolTip(hex_c)
-                try:
-                    btn.clicked.disconnect()
-                except RuntimeError:
-                    pass
-                btn.clicked.connect(lambda _checked=False, c=hex_c: self._copy_swatch(c))
+                old_fn = getattr(btn, "_swatch_fn", None)
+                if old_fn is not None:
+                    try:
+                        btn.clicked.disconnect(old_fn)
+                    except RuntimeError:
+                        pass
+                fn = lambda _checked=False, c=hex_c: self._copy_swatch(c)
+                btn._swatch_fn = fn
+                btn.clicked.connect(fn)
                 btn.show()
             else:
                 btn.hide()
