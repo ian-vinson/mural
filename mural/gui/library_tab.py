@@ -164,6 +164,38 @@ def _classify_file(path: Path) -> WallpaperInfo | None:
     return None
 
 
+def _get_pkg_version(wallpaper_path: Path) -> str | None:
+    """Read the PKGV version string from scene.pkg, or None if absent/unreadable."""
+    pkg_file = wallpaper_path / "scene.pkg"
+    if not pkg_file.exists():
+        return None
+    try:
+        with open(pkg_file, "rb") as f:
+            f.seek(8)
+            raw = f.read(8)
+            version = raw.split(b"\x00")[0].decode("ascii", errors="ignore")
+            return version if version.startswith("PKGV") else None
+    except OSError:
+        return None
+
+
+def _pkg_compatibility_warning(version: str | None) -> str:
+    """Return a warning string if *version* exceeds the safe range, else ''."""
+    if version is None:
+        return ""
+    try:
+        ver_num = int(version.replace("PKGV", ""))
+    except ValueError:
+        return ""
+    if ver_num > 8:
+        return (
+            f"This wallpaper uses scene package format {version} which may not "
+            f"render correctly with your version of linux-wallpaperengine. "
+            f"Video and web wallpapers are unaffected."
+        )
+    return ""
+
+
 def _check_aspect_mismatch(resolution: str) -> bool:
     """Return True if width/height < 2.0 — may not fill an ultrawide screen correctly."""
     if not resolution or "x" not in resolution.lower():
@@ -192,6 +224,7 @@ def _classify_directory(path: Path) -> WallpaperInfo | None:
                 thumb = str(candidate)
         if thumb is None:
             thumb = _find_directory_thumbnail(path)
+        pkg_ver = _get_pkg_version(path)
         return WallpaperInfo(
             name=meta["name"] or path.name,
             path=str(path),
@@ -204,6 +237,7 @@ def _classify_directory(path: Path) -> WallpaperInfo | None:
             file_size=_dir_size(path),
             source="local",
             aspect_mismatch=_check_aspect_mismatch(meta["resolution"]),
+            compatibility_warning=_pkg_compatibility_warning(pkg_ver),
         )
 
     # Web wallpaper — folder contains index.html

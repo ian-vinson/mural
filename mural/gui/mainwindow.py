@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -96,6 +97,25 @@ _WIN_MIN_W     = 1100
 _WIN_MIN_H     = 680
 
 _SPEED_STEPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+
+_SUPPRESS_PREVIEW_STDERR = {
+    "GLFW error 65548",
+    "The platform does not support setting the window position",
+    "Failed to initialize GLEW",
+}
+
+
+def _drain_preview_stderr(proc: "subprocess.Popen[bytes]") -> None:
+    """Read stderr from a preview lwe process, dropping suppressed lines."""
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    try:
+        for raw in proc.stderr:  # type: ignore[union-attr]
+            line = raw.decode("utf-8", errors="replace").strip()
+            if line and not any(w in line for w in _SUPPRESS_PREVIEW_STDERR):
+                _logger.debug("preview lwe: %s", line)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +230,16 @@ class _PreviewPanel(QWidget):
                     self._res_label, self._size_label, self._tags_label,
                     self._desc_label):
             meta_layout.addWidget(lbl)
+
+        self._compat_label = QLabel()
+        self._compat_label.setWordWrap(True)
+        self._compat_label.setStyleSheet(
+            "font-size: 11px; color: #FFA500;"
+            " background: rgba(220,140,0,0.1);"
+            " border-radius: 4px; padding: 4px 6px;"
+        )
+        self._compat_label.hide()
+        meta_layout.addWidget(self._compat_label)
 
         # Color palette swatches row
         self._colors_row = QWidget()
@@ -464,6 +494,12 @@ class _PreviewPanel(QWidget):
             desc = desc[:280].rstrip() + "…"
         _set_meta(self._desc_label, "Description:", desc)
 
+        if info.compatibility_warning:
+            self._compat_label.setText("⚠ " + info.compatibility_warning)
+            self._compat_label.show()
+        else:
+            self._compat_label.hide()
+
         # Show/hide action buttons based on source
         is_platform = info.source == "platform"
         self._download_btn.setVisible(is_platform)
@@ -615,6 +651,7 @@ class _PreviewPanel(QWidget):
         self._open_btn.hide()
         self._colors_row.hide()
         self._current_palette = []
+        self._compat_label.hide()
         self._props_section.hide()
         self._speed_section.hide()
         self._loop_section.hide()
@@ -642,11 +679,15 @@ class _PreviewPanel(QWidget):
                                 "linux-wallpaperengine binary not found.")
             return
         try:
-            self._preview_proc = subprocess.Popen([
-                str(binary),
-                "--window", "0x0x1280x720",
-                self._current_info.path,
-            ])
+            self._preview_proc = subprocess.Popen(
+                [str(binary), "--window", "0x0x1280x720", self._current_info.path],
+                stderr=subprocess.PIPE,
+            )
+            threading.Thread(
+                target=_drain_preview_stderr,
+                args=(self._preview_proc,),
+                daemon=True,
+            ).start()
         except OSError as exc:
             QMessageBox.critical(self, "Preview Error", str(exc))
 

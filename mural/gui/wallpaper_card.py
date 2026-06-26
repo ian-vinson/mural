@@ -102,6 +102,7 @@ class WallpaperInfo:
     source: str = "local"
     description: str = ""
     aspect_mismatch: bool = False
+    compatibility_warning: str = ""
 
     def type_label(self) -> str:
         """Return the uppercase badge label for this type."""
@@ -227,6 +228,9 @@ class WallpaperCard(QWidget):
 
         self._draw_type_badge(painter)
 
+        if self._info.compatibility_warning:
+            self._draw_compat_badge(painter)
+
         if self._has_props:
             self._draw_props_indicator(painter)
 
@@ -295,6 +299,26 @@ class WallpaperCard(QWidget):
                 Qt.AlignmentFlag.AlignCenter,
                 detail,
             )
+
+    def _draw_compat_badge(self, p: QPainter) -> None:
+        """Draw an amber ⚠ badge in the top-left corner for compatibility warnings."""
+        font = QFont()
+        font.setPixelSize(10)
+        font.setBold(True)
+        p.setFont(font)
+
+        fm = QFontMetrics(font)
+        label = "⚠"
+        text_w = fm.horizontalAdvance(label)
+        pad_x, pad_y = 6, 3
+        badge_w = text_w + pad_x * 2
+        badge_h = fm.height() + pad_y * 2
+
+        badge_path = QPainterPath()
+        badge_path.addRoundedRect(_BADGE_MARGIN, _BADGE_MARGIN, badge_w, badge_h, 3, 3)
+        p.fillPath(badge_path, QColor(220, 140, 0, 64))
+        p.setPen(QColor("#FFA500"))
+        p.drawText(_BADGE_MARGIN + pad_x, _BADGE_MARGIN + pad_y, text_w, fm.height(), 0, label)
 
     def _draw_type_badge(self, p: QPainter) -> None:
         """Draw the coloured type badge in the top-right corner."""
