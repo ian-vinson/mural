@@ -46,7 +46,7 @@ from typing import Callable
 
 import psutil
 
-from mural.utils.properties import load_overrides
+from mural.utils.properties import load_overrides, parse_properties
 
 logger = logging.getLogger(__name__)
 
@@ -450,7 +450,8 @@ class BackendRunner:
             a.wallpaper: load_overrides(a.wallpaper) for a in assignments
         }
 
-        # Screen assignments — span mode vs per-monitor mode
+        # Screen assignments — span mode vs per-monitor mode.
+        # lwe expects: --screen-root <mon> [--scaling <mode>] --bg <path>
         if self._screen_span and len(assignments) > 1:
             monitors_str = ",".join(a.monitor for a in assignments)
             _a0 = assignments[0]
@@ -459,9 +460,10 @@ class BackendRunner:
                 _per_scaling if _per_scaling and _per_scaling != "default"
                 else _a0.scaling
             )
+            cmd += ["--screen-span", monitors_str]
             if _eff_scaling and _eff_scaling != "default":
                 cmd += ["--scaling", _eff_scaling]
-            cmd += ["--screen-span", monitors_str, "--bg", _a0.wallpaper]
+            cmd += ["--bg", _a0.wallpaper]
         else:
             for assignment in assignments:
                 _per_scaling = _ovr_cache[assignment.wallpaper].get("scaling")
@@ -469,9 +471,10 @@ class BackendRunner:
                     _per_scaling if _per_scaling and _per_scaling != "default"
                     else assignment.scaling
                 )
+                cmd += ["--screen-root", assignment.monitor]
                 if _eff_scaling and _eff_scaling != "default":
                     cmd += ["--scaling", _eff_scaling]
-                cmd += ["--screen-root", assignment.monitor, "--bg", assignment.wallpaper]
+                cmd += ["--bg", assignment.wallpaper]
 
         for assignment in assignments:
             overrides = _ovr_cache[assignment.wallpaper]
@@ -484,7 +487,11 @@ class BackendRunner:
             except (ValueError, TypeError):
                 speed = 1.0
             if speed != 1.0:
-                cmd += ["--set-property", f"rate={speed}"]
+                _proj = Path(assignment.wallpaper) / "project.json"
+                if _proj.exists():
+                    _wp_keys = {p.key.lower() for p in parse_properties(str(_proj))}
+                    if "rate" in _wp_keys or "playbackrate" in _wp_keys:
+                        cmd += ["--set-property", f"rate={speed}"]
             loop_mode = overrides.get("loop_mode", "default")
             if loop_mode == "no_loop":
                 cmd += ["--set-property", "noloop=1"]

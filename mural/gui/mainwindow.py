@@ -280,7 +280,11 @@ class _PreviewPanel(QWidget):
         self._monitor_combo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
+        self._monitor_combo.currentTextChanged.connect(self._refresh_monitor_res)
         monitor_row.addWidget(self._monitor_combo, 1)
+        self._monitor_res_label = QLabel()
+        self._monitor_res_label.setStyleSheet("font-size: 11px; color: #555;")
+        monitor_row.addWidget(self._monitor_res_label)
         layout.addLayout(monitor_row)
 
         scaling_row = QHBoxLayout()
@@ -336,42 +340,19 @@ class _PreviewPanel(QWidget):
         layout.addWidget(self._open_btn)
 
     def _build_speed_section(self) -> QWidget:
-        """Build the per-wallpaper speed slider row."""
+        """Build the speed note widget (replaces the old speed slider)."""
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 2, 0, 2)
-        h.setSpacing(6)
-
-        speed_lbl = QLabel("Speed:")
-        speed_lbl.setStyleSheet("font-size: 12px; color: #ccc;")
-        speed_lbl.setFixedWidth(44)
-        h.addWidget(speed_lbl)
-
-        self._speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self._speed_slider.setRange(1, 8)
-        self._speed_slider.setValue(4)
-        self._speed_slider.setFixedWidth(110)
-        h.addWidget(self._speed_slider)
-
-        self._speed_value_lbl = QLabel("1.0x")
-        self._speed_value_lbl.setStyleSheet("font-size: 11px; color: #aaa;")
-        self._speed_value_lbl.setFixedWidth(34)
-        h.addWidget(self._speed_value_lbl)
-
-        self._speed_reset_btn = QPushButton("↺")
-        self._speed_reset_btn.setFixedSize(24, 24)
-        self._speed_reset_btn.setStyleSheet("font-size: 11px;")
-        self._speed_reset_btn.setToolTip("Reset to 1.0x")
-        h.addWidget(self._speed_reset_btn)
-
-        speed_hint = QLabel("(rate property)")
-        speed_hint.setStyleSheet("font-size: 10px; color: #555;")
-        h.addWidget(speed_hint)
+        h.setSpacing(4)
+        note = QLabel(
+            "Speed control: available for wallpapers with a Playback Rate property. "
+            "See Properties below."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("font-size: 10px; color: #666;")
+        h.addWidget(note)
         h.addStretch()
-
-        self._speed_slider.valueChanged.connect(self._on_speed_changed)
-        self._speed_reset_btn.clicked.connect(self._on_speed_reset)
-
         w.hide()
         return w
 
@@ -698,6 +679,19 @@ class _PreviewPanel(QWidget):
         if idx >= 0:
             self._monitor_combo.setCurrentIndex(idx)
 
+        self._refresh_monitor_res()
+
+    def _refresh_monitor_res(self, monitor_name: str | None = None) -> None:
+        """Show the pixel resolution of the currently selected monitor."""
+        if monitor_name is None:
+            monitor_name = self._monitor_combo.currentText()
+        for screen in QApplication.instance().screens():
+            if screen.name() == monitor_name:
+                geo = screen.geometry()
+                self._monitor_res_label.setText(f"{geo.width()}×{geo.height()}")
+                return
+        self._monitor_res_label.setText("")
+
     # ------------------------------------------------------------------
     # Properties panel
     # ------------------------------------------------------------------
@@ -762,9 +756,13 @@ class _PreviewPanel(QWidget):
             vbox.setContentsMargins(0, 0, 0, 2)
             vbox.setSpacing(2)
 
+            _is_playback = any(kw in prop.key.lower() for kw in ("rate", "speed", "playback"))
             lbl_row = QHBoxLayout()
-            lbl = QLabel(prop.label)
-            lbl.setStyleSheet("font-size: 12px; color: #ccc;")
+            lbl = QLabel("⚡ Playback Rate" if _is_playback else prop.label)
+            if _is_playback:
+                lbl.setStyleSheet("font-size: 12px; color: #80DEEA; font-weight: bold;")
+            else:
+                lbl.setStyleSheet("font-size: 12px; color: #ccc;")
             val_lbl = QLabel()
             val_lbl.setStyleSheet("font-size: 11px; color: #aaa;")
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -875,23 +873,11 @@ class _PreviewPanel(QWidget):
         self._reapply_current()
 
     def _load_speed_loop(self, info) -> None:
-        """Load saved speed and loop_mode overrides and update widgets."""
-        from mural.utils.properties import load_overrides
-        overrides = load_overrides(info.path)
-
-        try:
-            speed = float(overrides.get("speed", "1.0"))
-        except (ValueError, TypeError):
-            speed = 1.0
-        diffs = [abs(speed - s) for s in _SPEED_STEPS]
-        step = diffs.index(min(diffs)) + 1
-        self._speed_slider.blockSignals(True)
-        self._speed_slider.setValue(step)
-        self._speed_slider.blockSignals(False)
-        self._speed_value_lbl.setText(f"{_SPEED_STEPS[step - 1]}x")
+        """Load saved loop_mode override and update the loop widget."""
         self._speed_section.show()
 
-        loop_mode = overrides.get("loop_mode", "default")
+        from mural.utils.properties import load_overrides
+        loop_mode = load_overrides(info.path).get("loop_mode", "default")
         if info.type.lower() == "video":
             idx = self._loop_combo.findData(loop_mode)
             self._loop_combo.blockSignals(True)
@@ -900,23 +886,6 @@ class _PreviewPanel(QWidget):
             self._loop_section.show()
         else:
             self._loop_section.hide()
-
-    def _on_speed_changed(self, step: int) -> None:
-        if not self._current_info:
-            return
-        speed = _SPEED_STEPS[max(0, min(7, step - 1))]
-        self._speed_value_lbl.setText(f"{speed}x")
-        from mural.utils.properties import load_overrides, save_overrides
-        overrides = load_overrides(self._current_info.path)
-        if speed == 1.0:
-            overrides.pop("speed", None)
-        else:
-            overrides["speed"] = str(speed)
-        save_overrides(self._current_info.path, overrides)
-        self._reapply_current()
-
-    def _on_speed_reset(self) -> None:
-        self._speed_slider.setValue(4)
 
     def _on_loop_changed(self, _index: int) -> None:
         if not self._current_info:
