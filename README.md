@@ -196,6 +196,31 @@ AUR (Arch, CachyOS, Manjaro, EndeavourOS):
   paru -S mural-git
   # or: yay -S mural-git
 
+AppImage (any Linux distro):
+  # Download from GitHub Releases
+  wget https://github.com/ian-vinson/mural/releases/download/v0.2.0/Mural-0.2.0-x86_64.AppImage
+  chmod +x Mural-0.2.0-x86_64.AppImage
+  ./Mural-0.2.0-x86_64.AppImage
+
+  Requires on host system:
+    - linux-wallpaperengine  (paru -S linux-wallpaperengine-git)
+    - python-gobject          (sudo pacman -S python-gobject)
+
+  Build it yourself:
+    bash scripts/build-appimage.sh
+    # Output: dist/Mural-0.2.0-x86_64.AppImage
+
+Flatpak (any Linux distro with Flatpak):
+  # Not yet on Flathub — build locally for now:
+  # See flatpak/README.md for full instructions.
+  flatpak-builder --user --install --force-clean \
+      /tmp/mural-flatpak-build \
+      flatpak/io.github.ian_vinson.Mural.yml
+  flatpak run io.github.ian_vinson.Mural
+
+  # Once on Flathub:
+  flatpak install flathub io.github.ian_vinson.Mural
+
 Manual:
   # 1. Install linux-wallpaperengine
   paru -S linux-wallpaperengine-git

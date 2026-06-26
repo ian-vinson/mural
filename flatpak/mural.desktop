@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Mural
+GenericName=Animated Wallpaper
+Comment=Animated wallpaper platform for Linux
+Exec=mural %u
+Icon=io.github.ian_vinson.Mural
+Categories=Settings;DesktopSettings;
+Keywords=wallpaper;animated;background;linux;ricing;
+StartupNotify=true

@@ -1,0 +1,87 @@
+app-id: io.github.ian_vinson.Mural
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.python3
+command: mural
+
+finish-args:
+  # Display
+  - --socket=wayland
+  - --socket=x11
+  - --device=dri
+  # D-Bus: session bus for mural-core IPC and KDE integration
+  - --socket=session-bus
+  # Filesystem: wallpaper files live in home
+  - --filesystem=home
+  # systemd user service management
+  - --system-talk-name=org.freedesktop.systemd1
+  # lwe is a host binary — call via Flatpak portal
+  - --talk-name=org.freedesktop.Flatpak
+
+build-options:
+  append-path: /usr/lib/sdk/python3/bin
+  env:
+    PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    PYTHONDONTWRITEBYTECODE: '1'
+
+modules:
+  - name: python-dasbus
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-build-isolation dasbus
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/source/d/dasbus/dasbus-1.7.tar.gz
+        sha256: FILLME  # run: pip download dasbus==1.7 && sha256sum dasbus-1.7.tar.gz
+
+  - name: python-pillow
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-build-isolation Pillow
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/source/p/pillow/pillow-11.2.1.tar.gz
+        sha256: FILLME  # run: pip download Pillow==11.2.1 && sha256sum pillow-*.tar.gz
+
+  - name: python-psutil
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-build-isolation psutil
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/source/p/psutil/psutil-6.1.1.tar.gz
+        sha256: FILLME  # run: pip download psutil==6.1.1 && sha256sum psutil-*.tar.gz
+
+  - name: python-watchdog
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-build-isolation watchdog
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/source/w/watchdog/watchdog-6.0.0.tar.gz
+        sha256: FILLME  # run: pip download watchdog==6.0.0 && sha256sum watchdog-*.tar.gz
+
+  - name: python-requests
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-build-isolation requests
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/source/r/requests/requests-2.32.3.tar.gz
+        sha256: FILLME  # run: pip download requests==2.32.3 && sha256sum requests-*.tar.gz
+
+  - name: mural
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-deps --no-build-isolation .
+      - install -Dm644 systemd/mural-core.service
+            /app/share/systemd/user/mural-core.service
+      - install -Dm644 flatpak/mural.desktop
+            /app/share/applications/io.github.ian_vinson.Mural.desktop
+      - install -Dm644 flatpak/io.github.ian_vinson.Mural.metainfo.xml
+            /app/share/metainfo/io.github.ian_vinson.Mural.metainfo.xml
+    sources:
+      - type: dir
+        path: ..

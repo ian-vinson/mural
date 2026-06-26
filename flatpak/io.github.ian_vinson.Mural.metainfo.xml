@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.ian_vinson.Mural</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Mural</name>
+  <summary>Animated wallpaper platform for Linux</summary>
+  <description>
+    <p>Mural is an open source animated wallpaper platform for Linux.
+    Set video, scene, and web-based animated wallpapers on your desktop
+    with session persistence, multi-monitor support, and native Linux
+    ricing integrations including pywal, matugen, Hyprland IPC, and
+    OpenRGB.</p>
+    <p>Features:</p>
+    <ul>
+      <li>Video, scene, and web wallpaper support via linux-wallpaperengine</li>
+      <li>Multi-monitor with independent per-monitor assignments</li>
+      <li>Playlist system with shuffle, auto-rotate, and drag-and-drop</li>
+      <li>KDE Plasma 6 integration (Wayland + X11)</li>
+      <li>pywal, matugen, Hyprland IPC, and OpenRGB integration</li>
+      <li>Session persistence via systemd user service</li>
+    </ul>
+  </description>
+  <url type="homepage">https://github.com/ian-vinson/mural</url>
+  <url type="bugtracker">https://github.com/ian-vinson/mural/issues</url>
+  <launchable type="desktop-id">io.github.ian_vinson.Mural.desktop</launchable>
+  <releases>
+    <release version="0.2.0" date="2026-06-26">
+      <description>
+        <p>Full flag coverage for linux-wallpaperengine, per-wallpaper scaling
+        persistence, KDE Activities sync, multi-monitor profiles, VRAM pause,
+        matugen and Hyprland IPC integration, and AUR packaging.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>
