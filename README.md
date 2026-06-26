@@ -13,7 +13,7 @@ Built for the Linux desktop Wallpaper Engine always refused to support.
 
 PROJECT STATUS
 --------------
-Version: 0.2.0-alpha (pre-release, active development)
+Version: 0.2.0
 Primary Target: KDE Plasma 6 (Wayland + X11)
 Rendering Backend: linux-wallpaperengine by Almamu
 GUI Framework: Python 3.11+ / PySide6
@@ -21,7 +21,7 @@ License: GPL v3
 
 ---
 
-FEATURES (v0.2.0-alpha)
+FEATURES (v0.2.0)
 ------------------------
 
 WALLPAPER PLAYBACK

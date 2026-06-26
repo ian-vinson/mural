@@ -1,6 +1,6 @@
 MURAL - DEVGUIDE.txt
 ====================
-Developer Guide — Mural v0.2.0-alpha Architecture Reference
+Developer Guide — Mural v0.2.0 Architecture Reference
 
 This document covers the full technical architecture, module layout,
 key design decisions, and known hard problems. Written for a developer
@@ -63,7 +63,7 @@ mural/
 ├── .SRCINFO                    # AUR metadata (generated from PKGBUILD)
 │
 ├── mural/                      # Main Python package
-│   ├── __init__.py             # __version__ = "0.2.0-alpha"
+│   ├── __init__.py             # __version__ = "0.2.0"
 │   ├── main.py                 # Entry point: launches GUI + service
 │   ├── cli.py                  # mural-cli entry point
 │   ├── config.py               # ~/.config/mural/config.json management
@@ -555,7 +555,7 @@ To update after changes:
      cp PKGBUILD .SRCINFO aur-mural/
      cd aur-mural
      git add -A
-     git commit -m "Update to v0.2.0-alpha"
+     git commit -m "Update to v0.2.0"
      git push
 
 Test PKGBUILD locally first:

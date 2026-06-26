@@ -62,7 +62,7 @@ All notable changes to Mural are documented here.
 - `usershortcut`, `separator`, `label`, and `group` property types skipped gracefully (debug log).
 - Conditional properties (those with a WE `condition` field) marked with a `*` suffix and tooltip
   showing the condition expression; rendered in grey to distinguish from always-active properties.
-- Version string in the window title bar (`Mural 0.2.0-alpha`).
+- Version string in the window title bar (`Mural 0.2.0`).
 - Help → About Mural dialog: version, rendering backend, license.
 
 **Session Lock (SDDM)**
@@ -92,7 +92,7 @@ All notable changes to Mural are documented here.
 ### Changed
 - Speed slider removed from the preview panel; speed control is now the wallpaper's own
   Playback Rate property in the Properties panel, highlighted with ⚡ when detected.
-- Version bumped to `0.2.0-alpha` in `mural/__init__.py`, `pyproject.toml`,
+- Version bumped to `0.2.0` in `mural/__init__.py`, `pyproject.toml`,
   `mural/core/service.py`, and `mural/main.py`.
 
 ---
