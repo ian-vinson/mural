@@ -39,11 +39,15 @@ logger = logging.getLogger(__name__)
 _BINARY_NAME = "linux-wallpaperengine"
 
 # Ordered list of directories to search for the lwe binary beyond PATH.
+# The Mural fork of linux-wallpaperengine (github.com/ian-vinson/linux-wallpaperengine)
+# provides improved wallpaper compatibility and is the recommended backend for Mural.
 _BINARY_SEARCH_DIRS: tuple[str, ...] = (
     "/usr/bin",
     "/usr/local/bin",
     "/opt/linux-wallpaperengine",
     "/opt/linux-wallpaperengine/bin",
+    # Mural lwe fork — local build output (development use)
+    str(Path("~/Downloads/linux-wallpaperengine/build/output").expanduser()),
 )
 
 # Relative path from the Steam root to the wallpaper_engine assets directory.
@@ -129,7 +133,10 @@ def find_lwe_binary() -> Path | None:
 
     logger.warning(
         "linux-wallpaperengine binary not found. "
-        "Install via AUR (paru -S linux-wallpaperengine-git) or set MURAL_LWE_BINARY."
+        "Recommended: build the Mural fork for best compatibility — "
+        "https://github.com/ian-vinson/linux-wallpaperengine. "
+        "Standard AUR install: paru -S linux-wallpaperengine-git. "
+        "Or set MURAL_LWE_BINARY to a custom binary path."
     )
     return None
 
@@ -229,7 +236,9 @@ def require_binary() -> Path:
     if binary is None:
         raise FileNotFoundError(
             "linux-wallpaperengine binary not found. "
-            "Install it via AUR (paru -S linux-wallpaperengine-git) "
-            "or set the MURAL_LWE_BINARY environment variable."
+            "For best wallpaper compatibility, build the Mural fork: "
+            "https://github.com/ian-vinson/linux-wallpaperengine. "
+            "Standard install: paru -S linux-wallpaperengine-git. "
+            "Or set the MURAL_LWE_BINARY environment variable."
         )
     return binary
