@@ -180,19 +180,25 @@ def _get_pkg_version(wallpaper_path: Path) -> str | None:
 
 
 def _pkg_compatibility_warning(version: str | None) -> str:
-    """Return a warning string if *version* exceeds the safe range, else ''."""
+    """Return a warning string if *version* is known-incompatible, else ''.
+
+    History: the original threshold (> PKGV0008) predated the Mural lwe fork.
+    PKGV0001–0024 have been validated by the T2A self-validation suite
+    (PKGV0001–0024) and render correctly with the fork.  We now only warn on
+    formats with a *confirmed* render blocker, not merely on version number.
+
+    Known confirmed-broken: none as of T5B.  VolumeLight objects (seen in
+    Cyberpunk Lucy / 3521337568) cause a grey render but that is an unsupported
+    object type, not a pkg format issue — it will get its own indicator when
+    T6 object support lands.
+    """
     if version is None:
         return ""
     try:
-        ver_num = int(version.replace("PKGV", ""))
+        int(version.replace("PKGV", ""))
     except ValueError:
         return ""
-    if ver_num > 8:
-        return (
-            f"This wallpaper uses scene package format {version} which may not "
-            f"render correctly with your version of linux-wallpaperengine. "
-            f"Video and web wallpapers are unaffected."
-        )
+    # No version range is currently confirmed-incompatible with the lwe fork.
     return ""
 
 
