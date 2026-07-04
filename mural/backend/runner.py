@@ -135,7 +135,7 @@ class BackendRunner:
         restart_grace_seconds: float = 10.0,
         fps_limit: int = 30,
         mute_audio: bool = False,
-        volume: int = 80,
+        volume: int = 100,
         no_automute: bool = False,
         no_audio_processing: bool = False,
         fullscreen_pause: bool = True,
@@ -342,7 +342,7 @@ class BackendRunner:
         fullscreen_pause: bool,
         disable_mouse: bool = False,
         disable_parallax: bool = False,
-        volume: int = 80,
+        volume: int = 100,
         no_automute: bool = False,
         no_audio_processing: bool = False,
         fullscreen_pause_only_active: bool = False,
@@ -409,11 +409,14 @@ class BackendRunner:
             cmd += ["--fps", str(self._fps_limit)]
 
         # Audio
+        # lwe's --volume scale is 0-128 (128 = full volume), not 0-100.
+        # Always pass --volume explicitly so lwe never falls back to its
+        # own quiet internal default (~15).
         if self._mute_audio:
             cmd.append("--silent")
         else:
-            if self._volume != 100:
-                cmd += ["--volume", str(self._volume)]
+            lwe_volume = int(self._volume * 128 / 100)
+            cmd += ["--volume", str(lwe_volume)]
         if self._no_automute:
             cmd.append("--noautomute")
         if self._no_audio_processing:
