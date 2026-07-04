@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 PROPS_FILE = Path("~/.config/mural/wallpaper_properties.json").expanduser()
 
+# Mural-level synthetic override keys — translated into launch-time CLI flags
+# (--scaling, rate=/noloop=1/pingpong=1 via --set-property) rather than being
+# forwarded verbatim as --set-property overrides of real project.json keys.
+SYNTHETIC_OVERRIDE_KEYS = frozenset({"speed", "loop_mode", "scaling"})
+
 # Maps project.json type strings to our canonical type names.
 _TYPE_MAP: dict[str, str] = {
     "bool":      "bool",
@@ -200,6 +205,13 @@ def load_overrides(wallpaper_path: str) -> dict[str, str]:
         return {k: str(v) for k, v in data.get(wallpaper_path, {}).items()}
     except Exception:
         return {}
+
+
+def real_property_overrides(overrides: dict[str, str]) -> dict[str, str]:
+    """Filter out Mural's synthetic override keys (speed/loop_mode/scaling),
+    returning only overrides that correspond to actual project.json-declared
+    properties eligible for live reload."""
+    return {k: v for k, v in overrides.items() if k not in SYNTHETIC_OVERRIDE_KEYS}
 
 
 def save_overrides(wallpaper_path: str, overrides: dict[str, str]) -> None:

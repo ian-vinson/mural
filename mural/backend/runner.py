@@ -33,6 +33,7 @@ the Core Service to drive it.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -46,12 +47,17 @@ from typing import Callable
 
 import psutil
 
-from mural.utils.properties import load_overrides, parse_properties
+from mural.utils.properties import load_overrides, parse_properties, real_property_overrides
 
 logger = logging.getLogger(__name__)
 
 _LWE_PROCESS_NAME = "linux-wallpaperengine"
 _SIGTERM_TIMEOUT = 3.0  # seconds to wait after SIGTERM before SIGKILL
+
+# lwe's live property-reload path: written before sending SIGUSR1, read only
+# on that signal — never consulted at startup, so it's harmless to always
+# pass --properties-file even when nothing has been pushed to it yet.
+_PROPERTIES_FILE = Path("~/.config/mural/live_properties.json").expanduser()
 
 # KWin holds the last rendered frame buffer briefly after lwe exits, causing
 # the old frame to bleed through during an overlap/crossfade transition.
@@ -335,6 +341,64 @@ class BackendRunner:
             self._intentional_stop = False
             self._start_process()
 
+    def push_live_properties(self, wallpaper_path: str) -> bool:
+        """Live-reload real (non-synthetic) property overrides for
+        *wallpaper_path* on the running lwe process, if it's currently
+        assigned to any monitor. Returns True if a reload was sent, False
+        if there's nothing to do (lwe not running, or wallpaper_path isn't
+        currently assigned anywhere).
+
+        Does NOT restart lwe. Only handles properties eligible for live
+        reload — callers must still use restart()/set_extra_props() for
+        synthetic overrides (speed/loop_mode/scaling).
+        """
+        # Held for the whole body (file write + signal) rather than just the
+        # assignment check: releasing early would let a concurrent stop()/
+        # restart() kill or replace self._process between our check and the
+        # SIGUSR1, sending the signal to a dead or reused pid. Matches how
+        # restart() already holds the lock across its own blocking
+        # stop+start sequence.
+        with self._lock:
+            if not self._process or self._process.poll() is not None:
+                return False
+
+            matching = [a for a in self._assignments if a.wallpaper == wallpaper_path]
+            if not matching:
+                return False
+
+            overrides = real_property_overrides(load_overrides(wallpaper_path))
+
+            payload: dict[str, dict[str, str]] = {}
+            if self._screen_span and len(self._assignments) > 1:
+                # Span mode: ALL current assignments share one background,
+                # keyed as "span:<firstMonitorInSpanOrder>" — must match the
+                # exact order used to build --screen-span on launch, i.e.
+                # self._assignments[0].monitor, not a re-sorted or
+                # re-derived value.
+                span_key = f"span:{self._assignments[0].monitor}"
+                payload[span_key] = overrides
+            else:
+                for assignment in matching:
+                    payload[assignment.monitor] = overrides
+
+            try:
+                _PROPERTIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+                _PROPERTIES_FILE.write_text(json.dumps(payload), encoding="utf-8")
+            except OSError:
+                logger.exception("Failed to write live properties file")
+                return False
+
+            try:
+                os.kill(self._process.pid, signal.SIGUSR1)
+            except ProcessLookupError:
+                return False
+
+            logger.info(
+                "Pushed live property reload for %s (%d key(s))",
+                wallpaper_path, len(overrides),
+            )
+            return True
+
     def update_playback(
         self,
         fps_limit: int,
@@ -401,6 +465,8 @@ class BackendRunner:
     def _build_command(self, assignments: list[WallpaperAssignment]) -> list[str]:
         """Build the lwe CLI command for the given assignments."""
         cmd: list[str] = [str(self._binary)]
+
+        cmd += ["--properties-file", str(_PROPERTIES_FILE)]
 
         if self._assets:
             cmd += ["--assets-dir", str(self._assets)]
@@ -481,9 +547,7 @@ class BackendRunner:
 
         for assignment in assignments:
             overrides = _ovr_cache[assignment.wallpaper]
-            for key, value in overrides.items():
-                if key in ("speed", "loop_mode", "scaling"):
-                    continue  # handled as command flags, not --set-property
+            for key, value in real_property_overrides(overrides).items():
                 cmd += ["--set-property", f"{key}={value}"]
             try:
                 speed = float(overrides.get("speed", "1.0"))

@@ -83,6 +83,14 @@ class IMuralCore:
         """Apply a wallpaper to a named monitor with optional scaling mode."""
         ...
 
+    def ReloadWallpaperProperties(self, path: Str) -> Bool:
+        """Live-reload real property overrides for *path* if it's the
+        currently active wallpaper on any monitor. Returns False if lwe
+        isn't running, path isn't currently assigned, or the push failed
+        for any reason — callers should fall back to SetWallpaper (full
+        restart) in that case."""
+        ...
+
     def GetCurrentWallpaper(self, monitor: Str) -> Str:
         """Return the active wallpaper path for *monitor*, or ``""``."""
         ...
@@ -403,6 +411,11 @@ class MuralCoreService(IMuralCore):
             if bool(_cfg.get("openrgb_sync", False)):
                 self._run_openrgb_async(path)
         return result
+
+    def ReloadWallpaperProperties(self, path: str) -> bool:  # type: ignore[override]
+        if not self._runner:
+            return False
+        return self._runner.push_live_properties(path)
 
     def GetCurrentWallpaper(self, monitor: str) -> str:  # type: ignore[override]
         assignment = self._monitor_manager.get_assignment(monitor)

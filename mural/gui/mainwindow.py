@@ -920,14 +920,25 @@ class _PreviewPanel(QWidget):
         return container
 
     def _on_prop_changed(self, prop, value: str) -> None:
-        """Persist the override and restart lwe if this wallpaper is currently active."""
+        """Persist the override; live-reload if this wallpaper is active and
+        the property supports it, otherwise fall back to a full restart."""
         if not self._current_info:
             return
         from mural.utils.properties import load_overrides, save_overrides
         overrides = load_overrides(self._current_info.path)
         overrides[prop.key] = value
         save_overrides(self._current_info.path, overrides)
-        self._reapply_current()
+
+        if not self._core:
+            return
+
+        try:
+            reloaded = self._core.ReloadWallpaperProperties(self._current_info.path)
+        except Exception:
+            reloaded = False
+
+        if not reloaded:
+            self._reapply_current()
 
     def _load_speed_loop(self, info) -> None:
         """Load saved loop_mode override and update the loop widget."""

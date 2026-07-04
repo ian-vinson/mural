@@ -5,7 +5,9 @@
 
 """Tests for mural/backend/ — discovery, formats, and runner."""
 
+import json
 import os
+import signal
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -182,3 +184,74 @@ class TestBackendRunner:
             runner.start([WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path))])
             assert runner.is_running()
         assert not runner.is_running()
+
+
+class TestPushLiveProperties:
+    def test_false_when_not_running(self, tmp_path):
+        runner = BackendRunner(binary_path=tmp_path / "lwe")
+        assert runner.push_live_properties(str(tmp_path)) is False
+
+    def test_false_when_wallpaper_not_assigned(self, tmp_path):
+        runner = BackendRunner(binary_path=tmp_path / "lwe")
+        runner._process = MagicMock(pid=1234)
+        runner._process.poll.return_value = None
+        runner._assignments = [
+            WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path / "other")),
+        ]
+        assert runner.push_live_properties(str(tmp_path)) is False
+
+    def test_writes_per_monitor_payload_and_signals(self, tmp_path, monkeypatch):
+        props_file = tmp_path / "live_properties.json"
+        monkeypatch.setattr("mural.backend.runner._PROPERTIES_FILE", props_file)
+        monkeypatch.setattr(
+            "mural.backend.runner.load_overrides",
+            lambda path: {"rain": "1", "speed": "2.0"},
+        )
+
+        wallpaper = str(tmp_path / "wp")
+        runner = BackendRunner(binary_path=tmp_path / "lwe")
+        runner._process = MagicMock(pid=4321)
+        runner._process.poll.return_value = None
+        runner._assignments = [WallpaperAssignment(monitor="DP-3", wallpaper=wallpaper)]
+
+        with patch("os.kill") as mock_kill:
+            result = runner.push_live_properties(wallpaper)
+
+        assert result is True
+        mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
+        payload = json.loads(props_file.read_text())
+        assert payload == {"DP-3": {"rain": "1"}}  # "speed" stripped as synthetic
+
+    def test_writes_span_keyed_payload(self, tmp_path, monkeypatch):
+        props_file = tmp_path / "live_properties.json"
+        monkeypatch.setattr("mural.backend.runner._PROPERTIES_FILE", props_file)
+        monkeypatch.setattr(
+            "mural.backend.runner.load_overrides",
+            lambda path: {"fog": "0.5"},
+        )
+
+        wallpaper = str(tmp_path / "wp")
+        runner = BackendRunner(binary_path=tmp_path / "lwe", screen_span=True)
+        runner._process = MagicMock(pid=999)
+        runner._process.poll.return_value = None
+        runner._assignments = [
+            WallpaperAssignment(monitor="DP-3", wallpaper=wallpaper),
+            WallpaperAssignment(monitor="HDMI-1", wallpaper=wallpaper),
+        ]
+
+        with patch("os.kill"):
+            result = runner.push_live_properties(wallpaper)
+
+        assert result is True
+        payload = json.loads(props_file.read_text())
+        assert payload == {"span:DP-3": {"fog": "0.5"}}
+
+    def test_properties_file_always_in_build_command(self, tmp_path, monkeypatch):
+        props_file = tmp_path / "live_properties.json"
+        monkeypatch.setattr("mural.backend.runner._PROPERTIES_FILE", props_file)
+        runner = BackendRunner(binary_path=tmp_path / "lwe")
+        cmd = runner._build_command(
+            [WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path))]
+        )
+        assert "--properties-file" in cmd
+        assert cmd[cmd.index("--properties-file") + 1] == str(props_file)
