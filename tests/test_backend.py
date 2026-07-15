@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,7 +27,12 @@ from mural.backend.formats import (
     find_preview_image,
     is_supported,
 )
-from mural.backend.runner import BackendRunner, WallpaperAssignment
+from mural.backend.runner import _DEBOUNCE_SECONDS, BackendRunner, WallpaperAssignment
+
+# start() is debounced (see runner._DEBOUNCE_SECONDS / issue #35) — tests
+# that call start() and immediately assert on the resulting process must
+# wait out the window first.
+_PAST_DEBOUNCE = _DEBOUNCE_SECONDS + 0.15
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +176,7 @@ class TestBackendRunner:
         runner = BackendRunner(binary_path=binary, auto_restart=False)
         try:
             runner.start([WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path))])
+            time.sleep(_PAST_DEBOUNCE)
             assert runner.is_running()
             assert runner.pid is not None
         finally:
@@ -182,6 +189,7 @@ class TestBackendRunner:
         binary.chmod(0o755)
         with BackendRunner(binary_path=binary, auto_restart=False) as runner:
             runner.start([WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path))])
+            time.sleep(_PAST_DEBOUNCE)
             assert runner.is_running()
         assert not runner.is_running()
 

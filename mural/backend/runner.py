@@ -54,6 +54,14 @@ logger = logging.getLogger(__name__)
 _LWE_PROCESS_NAME = "linux-wallpaperengine"
 _SIGTERM_TIMEOUT = 3.0  # seconds to wait after SIGTERM before SIGKILL
 
+# Trailing-edge debounce window for start(). Repro (#35): 5 back-to-back
+# SetWallpaper calls arrived ~35-40ms apart and each one killed the
+# previous call's lwe instance before it could render a first frame --
+# pure black screen for the whole burst. A single, isolated switch's own
+# spawn overhead alone measured 150-950ms, so 200ms comfortably absorbs a
+# rapid-click burst without adding perceptible lag to a deliberate switch.
+_DEBOUNCE_SECONDS = 0.2
+
 # lwe's live property-reload path: written before sending SIGUSR1, read only
 # on that signal — never consulted at startup, so it's harmless to always
 # pass --properties-file even when nothing has been pushed to it yet.
@@ -197,6 +205,11 @@ class BackendRunner:
         self._lock = threading.Lock()
         self._intentional_stop: bool = False
 
+        # Debounce state for start() — see _DEBOUNCE_SECONDS.
+        self._debounce_timer: threading.Timer | None = None
+        self._debounce_generation: int = 0
+        self._pending_assignments: list[WallpaperAssignment] | None = None
+
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
@@ -208,10 +221,20 @@ class BackendRunner:
         return self._transition_mode
 
     def start(self, assignments: list[WallpaperAssignment]) -> None:
-        """Start lwe with the given monitor-wallpaper assignments.
+        """Schedule lwe to (re)start with the given monitor-wallpaper
+        assignments, after a trailing-edge debounce window (see
+        ``_DEBOUNCE_SECONDS``).
 
-        If a process is already running it is stopped first using the
-        configured transition mode:
+        If another call to ``start()`` arrives before the window elapses,
+        the window resets and only the assignments from the LAST call are
+        ever applied — this is what keeps a rapid burst of calls (fast
+        clicking, or NextWallpaper/RandomWallpaper looping over several
+        monitors) from killing-and-respawning lwe once per call, which
+        previously interrupted each new instance before it could render a
+        first frame (issue #35).
+
+        Once the window elapses undisturbed, the actual transition runs
+        exactly as before:
 
         * ``"sequential"`` (default on KDE/KWin): kill old process first,
           wait for the compositor to release the surface, then start the
@@ -233,10 +256,43 @@ class BackendRunner:
         if not self._binary.exists():
             raise FileNotFoundError(f"lwe binary not found: {self._binary}")
 
+        with self._lock:
+            self._pending_assignments = list(assignments)
+            self._debounce_generation += 1
+            generation = self._debounce_generation
+            if self._debounce_timer is not None:
+                self._debounce_timer.cancel()
+            timer = threading.Timer(
+                _DEBOUNCE_SECONDS, self._fire_debounced_start, args=(generation,)
+            )
+            timer.daemon = True
+            self._debounce_timer = timer
+            timer.start()
+
+    def _fire_debounced_start(self, generation: int) -> None:
+        """Run the actual kill-old/spawn-new transition for the most
+        recent assignments passed to ``start()``.
+
+        Called from a ``threading.Timer`` once ``_DEBOUNCE_SECONDS`` has
+        elapsed with no newer ``start()`` call. *generation* is checked
+        against ``self._debounce_generation`` under the same lock that
+        would otherwise decide old_process/spawn — this is what makes the
+        check-and-act atomic against a concurrent ``stop()``/``restart()``
+        (both bump the generation before touching the process), so a
+        cancelled burst can never sneak a respawn in after an explicit
+        stop.
+        """
         mode = self._effective_transition_mode()
         old_process: subprocess.Popen[bytes] | None = None
 
         with self._lock:
+            if generation != self._debounce_generation:
+                return  # superseded by a newer start(), or cancelled by stop()/restart()
+            self._debounce_timer = None
+            assignments = self._pending_assignments
+            if assignments is None:
+                return
+
             if self._process and self._process.poll() is None:
                 old_process = self._process
             self._assignments = list(assignments)
@@ -315,8 +371,24 @@ class BackendRunner:
                 "Overlap transition: retired old lwe (pid=%d)", old_process.pid
             )
 
+    def _cancel_pending_debounce(self) -> None:
+        """Invalidate and cancel any pending debounced start().
+
+        Bumps the generation counter first (under lock) so that even if
+        the timer has already begun running ``_fire_debounced_start`` and
+        ``timer.cancel()`` is a no-op, its own generation check will still
+        see the bump and abort — see ``_fire_debounced_start``.
+        """
+        with self._lock:
+            self._debounce_generation += 1
+            timer = self._debounce_timer
+            self._debounce_timer = None
+        if timer is not None:
+            timer.cancel()
+
     def stop(self) -> None:
         """Stop the lwe process gracefully and join the monitor thread."""
+        self._cancel_pending_debounce()
         with self._lock:
             self._intentional_stop = True
             self._stop_event.set()
@@ -334,6 +406,7 @@ class BackendRunner:
 
     def restart(self) -> None:
         """Restart lwe with the current assignments."""
+        self._cancel_pending_debounce()
         with self._lock:
             self._intentional_stop = True
             self._stop_process()

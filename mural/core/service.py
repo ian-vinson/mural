@@ -378,7 +378,12 @@ class MuralCoreService(IMuralCore):
             GLib.source_remove(self._mpris_timer_id)
             self._mpris_timer_id = None
         self._unsubscribe_system_signals()
-        if self._runner and self._runner.is_running():
+        if self._runner:
+            # Unconditional: start() now debounces, so a burst can leave a
+            # pending (not-yet-spawned) start scheduled with no process
+            # running yet — is_running() alone would miss it and let it
+            # fire after shutdown. stop() cancels any pending debounce and
+            # is a cheap no-op when nothing is running.
             logger.info("Stopping lwe subprocess")
             self._runner.stop()
 
