@@ -11,10 +11,12 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mural.backend import runner as runner_mod
 from mural.backend.discovery import (
     DiscoveryResult,
     _BINARY_NAME,
@@ -33,6 +35,43 @@ from mural.backend.runner import _DEBOUNCE_SECONDS, BackendRunner, WallpaperAssi
 # that call start() and immediately assert on the resulting process must
 # wait out the window first.
 _PAST_DEBOUNCE = _DEBOUNCE_SECONDS + 0.15
+
+
+class _FakeProc:
+    """Synthetic process for orphan-scoping tests (#49).
+
+    Deliberately NOT a real psutil.Process/subprocess — every method is a
+    plain recorder so these tests can never touch the real process table,
+    regardless of what pid/uid values are used.
+    """
+
+    def __init__(self, pid, name, cmdline, uid):
+        self.pid = pid
+        self._uid = uid
+        self._cmdline = list(cmdline)
+        self.info = {
+            "pid": pid,
+            "name": name,
+            "cmdline": self._cmdline,
+            "uids": SimpleNamespace(real=uid),
+        }
+        self.terminate_called = False
+        self.kill_called = False
+
+    def uids(self):
+        return SimpleNamespace(real=self._uid)
+
+    def cmdline(self):
+        return self._cmdline
+
+    def terminate(self):
+        self.terminate_called = True
+
+    def kill(self):
+        self.kill_called = True
+
+    def wait(self, timeout=None):
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -169,29 +208,178 @@ class TestBackendRunner:
         runner = BackendRunner(binary_path=tmp_path / "lwe")
         assert runner.pid is None
 
-    def test_start_and_stop(self, tmp_path):
+    def test_start_and_stop(self, tmp_path, monkeypatch):
+        # kill_orphans()/the pre-spawn guard scan the REAL process table
+        # (#49) -- even with marker-scoped matching, a real production
+        # Mural instance for this same user would still legitimately match
+        # (same --properties-file marker) and get killed. process_iter is
+        # mocked to [] so this test can never touch the real process table,
+        # matching or not.
+        monkeypatch.setattr(runner_mod, "_PID_FILE", tmp_path / "runtime" / "lwe.pid")
         binary = tmp_path / "lwe"
         binary.write_text("#!/bin/sh\nsleep 60")
         binary.chmod(0o755)
         runner = BackendRunner(binary_path=binary, auto_restart=False)
         try:
-            runner.start([WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path))])
-            time.sleep(_PAST_DEBOUNCE)
+            with patch.object(runner_mod.psutil, "process_iter", return_value=[]):
+                runner.start([WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path))])
+                time.sleep(_PAST_DEBOUNCE)
             assert runner.is_running()
             assert runner.pid is not None
         finally:
             runner.stop()
         assert not runner.is_running()
 
-    def test_context_manager(self, tmp_path):
+    def test_context_manager(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(runner_mod, "_PID_FILE", tmp_path / "runtime" / "lwe.pid")
         binary = tmp_path / "lwe"
         binary.write_text("#!/bin/sh\nsleep 60")
         binary.chmod(0o755)
         with BackendRunner(binary_path=binary, auto_restart=False) as runner:
-            runner.start([WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path))])
-            time.sleep(_PAST_DEBOUNCE)
+            with patch.object(runner_mod.psutil, "process_iter", return_value=[]):
+                runner.start([WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path))])
+                time.sleep(_PAST_DEBOUNCE)
             assert runner.is_running()
         assert not runner.is_running()
+
+
+class TestOrphanScoping:
+    """#49: kill_orphans()/the pre-spawn guard must only ever touch a
+    process that is unmistakably a Mural-launched lwe for this user, never
+    just anything named linux-wallpaperengine. All psutil scanning is
+    mocked with _FakeProc — these tests never touch the real process
+    table, so they're safe to run alongside a live Mural instance.
+    """
+
+    def test_kill_orphans_ignores_other_tools_lwe(self, tmp_path, monkeypatch):
+        # e.g. the separately-installed KDE Plasma "Wallpaper Engine for
+        # Kde" plugin's own lwe binary -- same process name, no Mural marker.
+        monkeypatch.setattr(runner_mod, "_PID_FILE", tmp_path / "lwe.pid")
+        other_proc = _FakeProc(
+            pid=54321,
+            name="linux-wallpaperengine",
+            cmdline=["/opt/linux-wallpaperengine/linux-wallpaperengine", "--bg", "/some/path"],
+            uid=os.getuid(),
+        )
+        with patch.object(runner_mod.psutil, "process_iter", return_value=[other_proc]):
+            killed = BackendRunner.kill_orphans()
+
+        assert killed == 0
+        assert not other_proc.terminate_called
+        assert not other_proc.kill_called
+
+    def test_prespawn_guard_ignores_other_tools_lwe(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(runner_mod, "_PID_FILE", tmp_path / "lwe.pid")
+        binary = tmp_path / "lwe"
+        binary.write_text("#!/bin/sh\nsleep 60")
+        binary.chmod(0o755)
+        runner = BackendRunner(binary_path=binary, auto_restart=False)
+        runner._assignments = [WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path))]
+
+        other_proc = _FakeProc(
+            pid=54321,
+            name="linux-wallpaperengine",
+            cmdline=["/opt/linux-wallpaperengine/linux-wallpaperengine", "--bg", "/some/path"],
+            uid=os.getuid(),
+        )
+        fake_popen = MagicMock()
+        fake_popen.pid = 99999
+        fake_popen.poll.return_value = None
+
+        with patch.object(runner_mod.psutil, "process_iter", return_value=[other_proc]), \
+             patch.object(runner_mod.subprocess, "Popen", return_value=fake_popen), \
+             patch.object(runner_mod.os, "getpgid") as mock_getpgid, \
+             patch.object(runner_mod.os, "killpg") as mock_killpg, \
+             patch.object(runner_mod.threading, "Thread") as mock_thread:
+            runner._start_process()
+
+        assert not other_proc.terminate_called
+        assert not other_proc.kill_called
+        mock_killpg.assert_not_called()
+
+    def test_kill_orphans_kills_own_process_via_pidfile(self, tmp_path, monkeypatch):
+        pid_file = tmp_path / "lwe.pid"
+        monkeypatch.setattr(runner_mod, "_PID_FILE", pid_file)
+        pid_file.write_text("777", encoding="utf-8")
+
+        own_proc = _FakeProc(
+            pid=777,
+            name="linux-wallpaperengine",
+            cmdline=[
+                "/home/user/Downloads/linux-wallpaperengine/build/output/linux-wallpaperengine",
+                "--properties-file", str(runner_mod._PROPERTIES_FILE),
+                "--bg", "/some/path",
+            ],
+            uid=os.getuid(),
+        )
+        with patch.object(runner_mod.psutil, "Process", return_value=own_proc) as mock_ctor, \
+             patch.object(runner_mod.psutil, "process_iter") as mock_process_iter:
+            killed = BackendRunner.kill_orphans()
+
+        mock_ctor.assert_called_once_with(777)
+        mock_process_iter.assert_not_called()  # surgical path short-circuited; no broader sweep needed
+        assert own_proc.terminate_called
+        assert killed == 1
+        assert not pid_file.exists()
+
+    def test_kill_orphans_falls_back_when_pidfile_stale(self, tmp_path, monkeypatch):
+        pid_file = tmp_path / "lwe.pid"
+        monkeypatch.setattr(runner_mod, "_PID_FILE", pid_file)
+        pid_file.write_text("999", encoding="utf-8")
+
+        # The PID recorded in the file now belongs to something unrelated
+        # (e.g. reused by the OS since Mural last ran) -- no matching cmdline.
+        reused_proc = _FakeProc(
+            pid=999,
+            name="some-other-program",
+            cmdline=["/usr/bin/some-other-program"],
+            uid=os.getuid(),
+        )
+        # A genuinely orphaned Mural lwe process elsewhere in the table --
+        # only findable via the broader sweep fallback.
+        real_orphan = _FakeProc(
+            pid=4242,
+            name="linux-wallpaperengine",
+            cmdline=["/some/lwe", "--properties-file", str(runner_mod._PROPERTIES_FILE)],
+            uid=os.getuid(),
+        )
+
+        with patch.object(runner_mod.psutil, "Process", return_value=reused_proc), \
+             patch.object(runner_mod.psutil, "process_iter", return_value=[real_orphan]):
+            killed = BackendRunner.kill_orphans()
+
+        assert not reused_proc.terminate_called  # stale pidfile entry left alone
+        assert not reused_proc.kill_called
+        assert real_orphan.terminate_called  # found via the fallback sweep instead
+        assert killed == 1
+        assert not pid_file.exists()  # stale pidfile cleared
+
+    def test_pid_file_written_on_spawn_and_removed_on_stop(self, tmp_path, monkeypatch):
+        pid_file = tmp_path / "runtime" / "lwe.pid"
+        monkeypatch.setattr(runner_mod, "_PID_FILE", pid_file)
+
+        binary = tmp_path / "lwe"
+        binary.write_text("#!/bin/sh\nsleep 60")
+        binary.chmod(0o755)
+        runner = BackendRunner(binary_path=binary, auto_restart=False)
+        runner._assignments = [WallpaperAssignment(monitor="DP-3", wallpaper=str(tmp_path))]
+
+        fake_popen = MagicMock()
+        fake_popen.pid = 13579
+        fake_popen.poll.return_value = None
+
+        with patch.object(runner_mod.psutil, "process_iter", return_value=[]), \
+             patch.object(runner_mod.subprocess, "Popen", return_value=fake_popen), \
+             patch.object(runner_mod.threading, "Thread") as mock_thread:
+            runner._start_process()
+
+        assert pid_file.read_text(encoding="utf-8").strip() == "13579"
+
+        with patch.object(runner_mod.os, "getpgid", return_value=1), \
+             patch.object(runner_mod.os, "killpg"):
+            runner._stop_process()
+
+        assert not pid_file.exists()
 
 
 class TestPushLiveProperties:

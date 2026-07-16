@@ -67,6 +67,54 @@ _DEBOUNCE_SECONDS = 0.2
 # pass --properties-file even when nothing has been pushed to it yet.
 _PROPERTIES_FILE = Path("~/.config/mural/live_properties.json").expanduser()
 
+# Records the PID of the lwe process this user's Mural instance most
+# recently launched. XDG_RUNTIME_DIR (tmpfs, cleared on logout/reboot) so a
+# stale file can only ever point at a PID from the current login session —
+# never one recycled across a reboot. Used by kill_orphans() (#49) to find
+# a leftover process from a crashed previous mural-core instance precisely,
+# instead of guessing from the process table.
+_RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "mural"
+_PID_FILE = _RUNTIME_DIR / "lwe.pid"
+
+
+def _is_mural_lwe_process(cmdline: list[str]) -> bool:
+    """Return True if *cmdline* carries Mural's own --properties-file
+    marker (#49).
+
+    Every lwe process Mural launches is invoked with
+    ``--properties-file <_PROPERTIES_FILE>`` (see ``_build_command``) — a
+    flag/value no other program would plausibly pass. This distinguishes
+    "an lwe process THIS Mural install launched" from "any process that
+    happens to be named linux-wallpaperengine", which matters because a
+    separately installed copy (e.g. a KDE Plasma wallpaper plugin bundling
+    its own lwe binary) or an unrelated dev/test instance can coexist on
+    the same machine under the same user.
+    """
+    marker = str(_PROPERTIES_FILE)
+    return marker in cmdline
+
+
+def _read_pid_file() -> int | None:
+    try:
+        return int(_PID_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_pid_file(pid: int) -> None:
+    try:
+        _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PID_FILE.write_text(str(pid), encoding="utf-8")
+    except OSError:
+        logger.debug("Failed to write lwe pid file", exc_info=True)
+
+
+def _remove_pid_file() -> None:
+    try:
+        _PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Failed to remove lwe pid file", exc_info=True)
+
 # KWin holds the last rendered frame buffer briefly after lwe exits, causing
 # the old frame to bleed through during an overlap/crossfade transition.
 # On KDE we use a sequential (kill-then-start) strategy instead.
@@ -680,9 +728,13 @@ class BackendRunner:
                 env["XDG_SESSION_TYPE"] = "x11"
                 logger.debug("lwe env: inferred XDG_SESSION_TYPE=x11 from DISPLAY")
 
-        # Hard guard: kill any lwe process owned by this user before spawning.
-        # Catches processes that slipped past stop() or the orphan cleanup,
-        # preventing multiple simultaneous lwe instances.
+        # Hard guard: kill any lwe process THIS Mural install owns (#49:
+        # scoped to processes carrying our own --properties-file marker,
+        # never a bare name match — otherwise this would also kill an
+        # unrelated lwe install used by another tool, or someone else's
+        # dev/test instance). Catches processes that slipped past stop()
+        # or the orphan cleanup, preventing multiple simultaneous lwe
+        # instances.
         current_uid = os.getuid()
         for proc in psutil.process_iter(["pid", "name", "uids", "cmdline"]):
             try:
@@ -692,22 +744,27 @@ class BackendRunner:
                 is_lwe = name == _LWE_PROCESS_NAME or any(
                     _LWE_PROCESS_NAME in str(arg) for arg in cmdline
                 )
-                if is_lwe and uids and uids.real == current_uid:
-                    if exclude_pid is not None and proc.pid == exclude_pid:
-                        continue  # keep old process alive during overlap transition
-                    logger.warning("Pre-spawn guard: killing lwe (pid=%d)", proc.pid)
+                if not is_lwe:
+                    continue
+                if not (uids and uids.real == current_uid):
+                    continue
+                if not _is_mural_lwe_process(cmdline):
+                    continue  # not ours — e.g. a different lwe install/tool
+                if exclude_pid is not None and proc.pid == exclude_pid:
+                    continue  # keep old process alive during overlap transition
+                logger.warning("Pre-spawn guard: killing lwe (pid=%d)", proc.pid)
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
                     try:
-                        pgid = os.getpgid(proc.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        try:
-                            proc.kill()
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                    try:
-                        proc.wait(timeout=2.0)
-                    except psutil.TimeoutExpired:
+                        proc.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
+                try:
+                    proc.wait(timeout=2.0)
+                except psutil.TimeoutExpired:
+                    pass
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
@@ -731,6 +788,7 @@ class BackendRunner:
         )
         self._start_time = time.monotonic()
         logger.info("lwe started (pid=%d)", self._process.pid)
+        _write_pid_file(self._process.pid)
 
         self._monitor_thread = threading.Thread(
             target=self._monitor_process,
@@ -745,6 +803,7 @@ class BackendRunner:
             return
         if self._process.poll() is not None:
             self._process = None
+            _remove_pid_file()
             return
 
         pid = self._process.pid
@@ -768,6 +827,7 @@ class BackendRunner:
             self._process.wait()
 
         self._process = None
+        _remove_pid_file()
 
     # ------------------------------------------------------------------
     # Background monitor thread
@@ -847,11 +907,21 @@ class BackendRunner:
 
     @staticmethod
     def kill_orphans(exclude_pid: int | None = None) -> int:
-        """Kill any lwe processes not owned by this runner.
+        """Kill a leftover lwe process launched by a previous, crashed
+        Mural instance for this user (#49).
 
-        Scans ``/proc`` via psutil for processes named
-        ``linux-wallpaperengine`` and terminates them.  Called at service
-        startup to clean up after a previous crash.
+        Tries the surgical path first: read the recorded PID file (see
+        ``_PID_FILE``); if it names a PID that is still alive, owned by
+        this user, AND whose cmdline still carries Mural's own
+        ``--properties-file`` marker (guards against the PID having been
+        reused by an unrelated process since), kill only that one
+        process. Falls back to a broader sweep — still scoped to this
+        user's own processes carrying the same marker, never a bare name
+        match — only if the pid file is missing, stale, or doesn't match.
+        This never kills a process just because it happens to be *named*
+        ``linux-wallpaperengine``: a separately installed copy used by a
+        different tool, or someone else's dev/test instance, is left
+        alone either way.
 
         Args:
             exclude_pid: PID to skip (used when an old process is being
@@ -860,26 +930,55 @@ class BackendRunner:
         Returns:
             Number of orphaned processes killed.
         """
-        killed = 0
-        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        current_uid = os.getuid()
+
+        pid_from_file = _read_pid_file()
+        if pid_from_file is not None and pid_from_file != exclude_pid:
             try:
-                name = proc.info.get("name") or ""
-                cmdline = proc.info.get("cmdline") or []
-                is_lwe = name == _LWE_PROCESS_NAME or any(
-                    _LWE_PROCESS_NAME in str(arg) for arg in cmdline
-                )
-                if is_lwe:
-                    if exclude_pid is not None and proc.pid == exclude_pid:
-                        continue
+                proc = psutil.Process(pid_from_file)
+                if proc.uids().real == current_uid and _is_mural_lwe_process(proc.cmdline()):
                     logger.warning(
-                        "Killing orphaned lwe process (pid=%d)", proc.pid
+                        "Killing orphaned lwe process from pid file (pid=%d)", pid_from_file
                     )
                     proc.terminate()
                     try:
                         proc.wait(timeout=3.0)
                     except psutil.TimeoutExpired:
                         proc.kill()
-                    killed += 1
+                    _remove_pid_file()
+                    return 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+            # Pid file named something dead, someone else's process, or a
+            # PID since reused by an unrelated process — don't trust it.
+            _remove_pid_file()
+
+        killed = 0
+        for proc in psutil.process_iter(["pid", "name", "uids", "cmdline"]):
+            try:
+                name = proc.info.get("name") or ""
+                cmdline = proc.info.get("cmdline") or []
+                uids = proc.info.get("uids")
+                is_lwe = name == _LWE_PROCESS_NAME or any(
+                    _LWE_PROCESS_NAME in str(arg) for arg in cmdline
+                )
+                if not is_lwe:
+                    continue
+                if not (uids and uids.real == current_uid):
+                    continue
+                if not _is_mural_lwe_process(cmdline):
+                    continue  # not ours — e.g. a different lwe install/tool
+                if exclude_pid is not None and proc.pid == exclude_pid:
+                    continue
+                logger.warning(
+                    "Killing orphaned lwe process (pid=%d)", proc.pid
+                )
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3.0)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                killed += 1
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
