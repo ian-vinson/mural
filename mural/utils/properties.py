@@ -29,14 +29,20 @@ PROPS_FILE = Path("~/.config/mural/wallpaper_properties.json").expanduser()
 SYNTHETIC_OVERRIDE_KEYS = frozenset({"speed", "loop_mode", "scaling"})
 
 # Maps project.json type strings to our canonical type names.
+#
+# "combo" and "text" are the real on-disk strings WE itself writes (per
+# WE_DOCS_REFERENCE.md and every real project.json sampled) — "textinput"
+# is also real (a less common but valid alias) and kept alongside "text".
 _TYPE_MAP: dict[str, str] = {
-    "bool":      "bool",
-    "slider":    "slider",
-    "color":     "color",
-    "combolist": "combo",
-    "textinput": "text",
-    "integer":   "slider",
-    "double":    "slider",
+    "bool":         "bool",
+    "slider":       "slider",
+    "color":        "color",
+    "combo":        "combo",
+    "text":         "text",
+    "textinput":    "text",
+    "integer":      "slider",
+    "double":       "slider",
+    "scenetexture": "texture",
 }
 
 # Property types that are UI/display-only in Wallpaper Engine — skip silently.
@@ -55,7 +61,8 @@ class WallpaperProperty:
     Attributes:
         key:     Property key used with ``--set-property key=value``.
         label:   Human-readable display name.
-        type:    ``"bool"``, ``"slider"``, ``"color"``, ``"combo"``, or ``"text"``.
+        type:    ``"bool"``, ``"slider"``, ``"color"``, ``"combo"``, ``"text"``,
+                 or ``"texture"``.
         value:   Default value as a string.
         min_val: Minimum value for slider type.
         max_val: Maximum value for slider type.
@@ -129,9 +136,15 @@ def parse_properties(project_json_path: str) -> list[WallpaperProperty]:
             val_str = str(raw_val) if raw_val is not None else ""
 
         # Numeric range / step for sliders.
-        min_val = float(item.get("min", 0.0))
-        max_val = float(item.get("max", 1.0))
-        precision = int(item.get("precision", 2))
+        try:
+            min_val = float(item.get("min", 0.0))
+            max_val = float(item.get("max", 1.0))
+            precision = int(item.get("precision", 2))
+        except (TypeError, ValueError):
+            logger.debug(
+                "Skipping property with malformed min/max/precision: %s", key
+            )
+            continue
         raw_step = item.get("step")
         try:
             step = float(raw_step) if raw_step is not None else 10 ** (-max(0, precision))

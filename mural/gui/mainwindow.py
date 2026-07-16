@@ -62,6 +62,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -902,6 +903,31 @@ class _PreviewPanel(QWidget):
                 lambda i, p=prop: self._on_prop_changed(p, str(i))
             )
             h.addWidget(combo, 1)
+            return container
+
+        if prop.type == "texture":
+            container = QWidget()
+            h = QHBoxLayout(container)
+            h.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel((prop.label + (" *" if prop.condition else "")) + ":")
+            lbl.setStyleSheet("font-size: 12px; color: #999;" if prop.condition else "font-size: 12px; color: #ccc;")
+            if prop.condition:
+                lbl.setToolTip(f"Conditional: {prop.condition}")
+            h.addWidget(lbl)
+            btn = QPushButton(Path(current_value).name if current_value else "Choose Image…")
+            btn.setStyleSheet("font-size: 11px; text-align: left;")
+
+            def _on_choose(_c=False, p=prop, b=btn):
+                path, _ = QFileDialog.getOpenFileName(
+                    self, f"Choose image for {p.label}", "",
+                    "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)",
+                )
+                if path:
+                    b.setText(Path(path).name)
+                    self._on_prop_changed(p, path)
+
+            btn.clicked.connect(_on_choose)
+            h.addWidget(btn, 1)
             return container
 
         # text (fallback)
