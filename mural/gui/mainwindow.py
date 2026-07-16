@@ -324,7 +324,10 @@ class _PreviewPanel(QWidget):
         self._scaling_combo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        self._scaling_combo.addItems(["default", "stretch", "fit", "fill"])
+        self._scaling_combo.addItem("Default", "default")
+        self._scaling_combo.addItem("Stretch", "stretch")
+        self._scaling_combo.addItem("Fit", "fit")
+        self._scaling_combo.addItem("Fill", "fill")
         self._scaling_combo.currentIndexChanged.connect(self._on_scaling_changed)
         scaling_row.addWidget(self._scaling_combo, 1)
         _hint_btn = QPushButton("?")
@@ -973,7 +976,7 @@ class _PreviewPanel(QWidget):
         from mural.utils.properties import load_overrides
         scaling = load_overrides(info.path).get("scaling", "default")
         self._scaling_combo.blockSignals(True)
-        idx = self._scaling_combo.findText(scaling)
+        idx = self._scaling_combo.findData(scaling)
         self._scaling_combo.setCurrentIndex(max(0, idx))
         self._scaling_combo.blockSignals(False)
 
@@ -981,7 +984,7 @@ class _PreviewPanel(QWidget):
         """Persist the scaling selection and reapply if this wallpaper is active."""
         if not self._current_info:
             return
-        scaling = self._scaling_combo.currentText()
+        scaling = self._scaling_combo.currentData()
         from mural.utils.properties import load_overrides, save_overrides
         overrides = load_overrides(self._current_info.path)
         if scaling == "default":
@@ -1124,7 +1127,7 @@ class _PreviewPanel(QWidget):
             return
 
         self._kill_preview()
-        scaling = self._scaling_combo.currentText()
+        scaling = self._scaling_combo.currentData()
 
         from mural.gui.settings_tab import _load_settings as _ls
         _st = _ls()
